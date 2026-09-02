@@ -21,10 +21,15 @@ function loadThree() {
 function parseValue(raw) {
   var v = raw && typeof raw === "object" ? raw : {};
   var ft = v.faceTrack && typeof v.faceTrack === "object" ? v.faceTrack : null;
+  var ss = v.skeletonStyle && typeof v.skeletonStyle === "object" ? v.skeletonStyle : {};
   return {
     jointsUrl: String(v.jointsUrl || ""),
     meshUrl: String(v.meshUrl || ""),
     skeletonUrl: String(v.skeletonUrl || ""),
+    skeletonStyle: {
+      bones: String(ss.bones || "octahedron"),
+      color: String(ss.color || "rainbow_y")
+    },
     fps: Number(v.fps) > 0 ? Number(v.fps) : 24,
     faceCam: !!v.faceCam,
     faceTrack: ft && Array.isArray(ft.headIdx) && ft.headIdx.length && Number(ft.noseIdx) >= 0
@@ -45,6 +50,7 @@ export default function View3DBodyWidget(container, props) {
     'font-size:11px;color:#d8d8d8;box-sizing:border-box;padding:6px;">' +
     '<div class="v3d-wrap" style="position:relative;flex:1;min-height:0;width:100%;background:#3b3b3b;border:1px solid #1a1a1a;border-radius:6px;overflow:hidden;">' +
     '<div class="v3d-msg" style="color:#9a9a9a;padding:60px 0;text-align:center;">Loading three.js...</div>' +
+    '<div class="v3d-inset" style="display:none;position:absolute;pointer-events:none;border:1px solid #5a5a5a;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,0.45);z-index:2;"></div>' +
     "</div>" +
     '<div class="v3d-bar" style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;' +
     'background:#1e1e1e;border:1px solid #1a1a1a;border-radius:4px;padding:4px 6px;">' +
@@ -55,12 +61,12 @@ export default function View3DBodyWidget(container, props) {
     '<select class="v3d-speed" style="background:#3d3d3d;color:#e0e0e0;border:1px solid #4a4a4a;border-radius:4px;padding:2px;cursor:pointer;">' +
     '<option value="0.25">0.25x</option><option value="0.5">0.5x</option><option value="1" selected>1x</option>' +
     '<option value="1.5">1.5x</option><option value="2">2x</option><option value="4">4x</option></select>' +
-    '<button class="v3d-face" title="Face mocap camera: follow the head" style="background:#3d3d3d;color:#e0e0e0;border:1px solid #4a4a4a;border-radius:4px;padding:3px 6px;cursor:pointer;white-space:nowrap;">Face</button>' +
+    '<button class="v3d-face" title="Face close-up inset (top-left corner): camera locked to the head" style="background:#3d3d3d;color:#e0e0e0;border:1px solid #4a4a4a;border-radius:4px;padding:3px 6px;cursor:pointer;white-space:nowrap;">Face</button>' +
     '<button class="v3d-full" title="Fullscreen" style="background:#3d3d3d;color:#e0e0e0;border:1px solid #4a4a4a;border-radius:4px;padding:3px 6px;cursor:pointer;">\u26f6</button>' +
-    '<span class="v3d-ver" style="color:#7a7a7a;white-space:nowrap;">v8</span>' +
+    '<span class="v3d-ver" style="color:#7a7a7a;white-space:nowrap;">v12</span>' +
     '<label style="display:flex;gap:3px;align-items:center;color:#b0b0b0;cursor:pointer;">' +
     '<input class="v3d-mesh" type="checkbox" checked />mesh</label>' +
-    '<label class="v3d-body-label" style="display:flex;gap:3px;align-items:center;color:#b0b0b0;cursor:pointer;">' +
+    '<label class="v3d-body-label" title="Show the body (not just the head) in the face close-up" style="display:flex;gap:3px;align-items:center;color:#b0b0b0;cursor:pointer;">' +
     '<input class="v3d-body" type="checkbox" checked />body</label>' +
     '<label style="display:flex;gap:3px;align-items:center;color:#b0b0b0;cursor:pointer;">' +
     '<input class="v3d-joints" type="checkbox" />joints</label>' +
@@ -81,6 +87,7 @@ export default function View3DBodyWidget(container, props) {
   var speedSel = container.querySelector(".v3d-speed");
   var faceBtn = container.querySelector(".v3d-face");
   var fullBtn = container.querySelector(".v3d-full");
+  var insetEl = container.querySelector(".v3d-inset");
 
   ["pointerdown", "keydown", "keyup", "wheel"].forEach(function (evt) {
     [playBtn, frameSlider, meshToggle, bodyToggle, jointsToggle, speedSel, faceBtn, fullBtn].forEach(function (el) {
@@ -102,11 +109,17 @@ export default function View3DBodyWidget(container, props) {
   var loadedSkelUrl = "";
   var resizeObserver = null;
   var perf = { t0: 0, count: 0 };
-  // Face mocap cam: rigidly attached to the head like a helmet rig. sc/sf/su
+  // Face mocap cam, rendered as a picture-in-picture inset in the top-left
+  // corner (its own camera; the main orbit view stays interactive). sc/sf/su
   // are the smoothed (locked) center / forward / up anchors so per-frame
   // estimation noise never shakes the camera; crownIdx is a top-of-skull
-  // vertex used to make the camera roll with the head.
-  var face = { on: false, dist: 0.55, sc: null, sf: null, su: null, crownIdx: -1, lastFrame: -99 };
+  // vertex used to make the camera roll with the head. userSet remembers a
+  // manual toggle so data reloads don't fight the user.
+  var face = { on: false, userSet: false, dist: 0.55, sc: null, sf: null, su: null, crownIdx: -1, lastFrame: -99 };
+  // Canvas size + inset rect (CSS px), recomputed on resize. y is measured
+  // from the BOTTOM edge because that's how WebGL viewports work.
+  var view = { w: 640, h: 360 };
+  var inset = { x: 8, y: 0, w: 0, h: 0 };
 
   function setMsg(text) {
     if (msg) msg.textContent = text;
@@ -138,9 +151,11 @@ export default function View3DBodyWidget(container, props) {
     var grid = new R.GridHelper(4, 16, 0x565656, 0x484848);
     scene.add(grid);
 
+    // Dedicated long-lens camera for the face close-up inset.
+    var faceCam = new R.PerspectiveCamera(28, 0.9, 0.01, 1000);
+
     var orbit = { theta: Math.PI, phi: 1.25, dist: 3.2, cx: 0, cy: 0.9, cz: 0 };
     function applyCamera() {
-      if (face.on) return; // face cam owns the camera per-frame
       var sp = Math.sin(orbit.phi);
       camera.position.set(
         orbit.cx + orbit.dist * sp * Math.sin(orbit.theta),
@@ -156,7 +171,6 @@ export default function View3DBodyWidget(container, props) {
     dom.addEventListener("pointerdown", function (e) {
       e.stopPropagation();
       e.preventDefault();
-      if (face.on) return; // face cam: camera is locked to the head, no user control
       // Middle or right button (or shift+left) pans, plain left rotates.
       var pan = e.button === 1 || e.button === 2 || e.shiftKey;
       drag = { x: e.clientX, y: e.clientY, pan: pan };
@@ -167,7 +181,7 @@ export default function View3DBodyWidget(container, props) {
       e.stopPropagation();
     });
     dom.addEventListener("pointermove", function (e) {
-      if (!drag || face.on) return;
+      if (!drag) return;
       var dx = e.clientX - drag.x;
       var dy = e.clientY - drag.y;
       if (drag.pan) {
@@ -197,14 +211,13 @@ export default function View3DBodyWidget(container, props) {
       function (e) {
         e.preventDefault();
         e.stopPropagation();
-        if (face.on) return; // face cam: locked, no zoom
         orbit.dist = Math.max(0.4, Math.min(30, orbit.dist * (e.deltaY > 0 ? 1.1 : 0.9)));
         applyCamera();
       },
       { passive: false }
     );
 
-    return { renderer: renderer, scene: scene, camera: camera, orbit: orbit, applyCamera: applyCamera, jointGroup: null };
+    return { renderer: renderer, scene: scene, camera: camera, faceCam: faceCam, grid: grid, orbit: orbit, applyCamera: applyCamera, jointGroup: null };
   }
 
   function updateFaceCam(idx) {
@@ -279,20 +292,13 @@ export default function View3DBodyWidget(container, props) {
     }
     var scx = face.sc[0], scy = face.sc[1], scz = face.sc[2];
     // Camera sits straight out along the face normal and inherits head roll.
-    ctx.camera.up.set(face.su[0], face.su[1], face.su[2]);
-    ctx.camera.position.set(
+    ctx.faceCam.up.set(face.su[0], face.su[1], face.su[2]);
+    ctx.faceCam.position.set(
       scx + face.dist * face.sf[0],
       scy + face.dist * face.sf[1],
       scz + face.dist * face.sf[2]
     );
-    ctx.camera.lookAt(scx, scy, scz);
-  }
-
-  function applyBodyVisibility() {
-    if (!meshData || !meshData.mesh) return;
-    var headOnly = !bodyToggle.checked && meshData.headIndex;
-    meshData.geometry.setIndex(headOnly ? meshData.headIndex : meshData.fullIndex);
-    meshData.geometry.index.needsUpdate = true;
+    ctx.faceCam.lookAt(scx, scy, scz);
   }
 
   function setFaceMode(on) {
@@ -304,16 +310,34 @@ export default function View3DBodyWidget(container, props) {
     face.sc = null; // re-lock the smoothed anchors from the current pose
     face.su = null;
     setFaceButton();
-    if (ctx) {
-      ctx.camera.fov = on ? 28 : 40; // longer lens for the face close-up
-      ctx.camera.updateProjectionMatrix();
-      if (on) {
-        updateFaceCam(anim.frame);
-      } else {
-        ctx.camera.up.set(0, 1, 0); // undo any head roll before orbiting again
-        ctx.applyCamera();
-      }
-    }
+    insetEl.style.display = on ? "block" : "none";
+    if (on) updateFaceCam(anim.frame);
+  }
+
+  function renderFaceInset() {
+    if (!face.on || !state.faceTrack || !meshData || !meshData.mesh || inset.w < 8) return;
+    var renderer = ctx.renderer;
+    // Head-only mode: swap to the head index buffer just for this pass so the
+    // main view keeps the full body.
+    var headOnly = !bodyToggle.checked && meshData.headIndex;
+    if (headOnly) meshData.geometry.setIndex(meshData.headIndex);
+    var meshWasVisible = meshData.mesh.visible;
+    meshData.mesh.visible = true; // the close-up always shows the mesh
+    var jointsWereVisible = ctx.jointGroup ? ctx.jointGroup.visible : false;
+    if (ctx.jointGroup) ctx.jointGroup.visible = false;
+    ctx.grid.visible = false;
+    renderer.setScissorTest(true);
+    renderer.setViewport(inset.x, inset.y, inset.w, inset.h);
+    renderer.setScissor(inset.x, inset.y, inset.w, inset.h);
+    renderer.setClearColor(0x2c2c2c); // slightly darker so the inset reads as its own view
+    renderer.render(ctx.scene, ctx.faceCam);
+    renderer.setClearColor(0x3b3b3b);
+    renderer.setScissorTest(false);
+    renderer.setViewport(0, 0, view.w, view.h);
+    ctx.grid.visible = true;
+    if (ctx.jointGroup) ctx.jointGroup.visible = jointsWereVisible;
+    meshData.mesh.visible = meshWasVisible;
+    if (headOnly) meshData.geometry.setIndex(meshData.fullIndex);
   }
 
   function setFrame(idx) {
@@ -348,17 +372,41 @@ export default function View3DBodyWidget(container, props) {
     if (skelData) {
       var sf2 = Math.min(idx, skelData.frames.length - 1);
       var pts = skelData.frames[sf2];
-      var lp = skelData.linePos;
-      for (var b = 0; b < skelData.bones.length; b++) {
-        var a3 = skelData.bones[b][0] * 3;
-        var b3 = skelData.bones[b][1] * 3;
-        lp[b * 6] = pts[a3]; lp[b * 6 + 1] = pts[a3 + 1]; lp[b * 6 + 2] = pts[a3 + 2];
-        lp[b * 6 + 3] = pts[b3]; lp[b * 6 + 4] = pts[b3 + 1]; lp[b * 6 + 5] = pts[b3 + 2];
-      }
-      skelData.lineGeo.attributes.position.needsUpdate = true;
-      for (var d = 0; d < skelData.dots.length; d++) {
-        var d3 = d * 3;
-        skelData.dots[d].position.set(pts[d3], pts[d3 + 1], pts[d3 + 2]);
+      if (skelData.octs) {
+        for (var b = 0; b < skelData.bones.length; b++) {
+          var a3 = skelData.bones[b][0] * 3;
+          var b3 = skelData.bones[b][1] * 3;
+          var dx = pts[b3] - pts[a3];
+          var dy = pts[b3 + 1] - pts[a3 + 1];
+          var dz = pts[b3 + 2] - pts[a3 + 2];
+          var len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+          var m = skelData.octs[b];
+          if (len < 1e-5) {
+            m.visible = false;
+            continue;
+          }
+          m.visible = true;
+          // Bone width tracks its length so finger bones stay slender. Kept
+          // slim so adjacent torso bones read as separate sticks, not a blob.
+          var w = Math.min(0.026, Math.max(0.004, len * 0.085));
+          m.position.set(pts[a3], pts[a3 + 1], pts[a3 + 2]);
+          m.scale.set(w, len, w);
+          skelData.dir.set(dx / len, dy / len, dz / len);
+          m.quaternion.setFromUnitVectors(skelData.up, skelData.dir);
+        }
+      } else {
+        var lp = skelData.linePos;
+        for (var b2 = 0; b2 < skelData.bones.length; b2++) {
+          var la = skelData.bones[b2][0] * 3;
+          var lb2 = skelData.bones[b2][1] * 3;
+          lp[b2 * 6] = pts[la]; lp[b2 * 6 + 1] = pts[la + 1]; lp[b2 * 6 + 2] = pts[la + 2];
+          lp[b2 * 6 + 3] = pts[lb2]; lp[b2 * 6 + 4] = pts[lb2 + 1]; lp[b2 * 6 + 5] = pts[lb2 + 2];
+        }
+        skelData.lineGeo.attributes.position.needsUpdate = true;
+        for (var d = 0; d < skelData.dots.length; d++) {
+          var d3 = d * 3;
+          skelData.dots[d].position.set(pts[d3], pts[d3 + 1], pts[d3 + 2]);
+        }
       }
     }
 
@@ -385,7 +433,7 @@ export default function View3DBodyWidget(container, props) {
         if (!perf.t0) perf.t0 = ts;
         perf.count += advance;
         if (ts - perf.t0 >= 1000) {
-          verEl.textContent = "v8 \u00b7 " + (perf.count * 1000 / (ts - perf.t0)).toFixed(1) + "fps";
+          verEl.textContent = "v12 \u00b7 " + (perf.count * 1000 / (ts - perf.t0)).toFixed(1) + "fps";
           perf.t0 = ts;
           perf.count = 0;
         }
@@ -395,6 +443,7 @@ export default function View3DBodyWidget(container, props) {
       perf.count = 0;
     }
     ctx.renderer.render(ctx.scene, ctx.camera);
+    renderFaceInset();
   }
 
   function frameCamera() {
@@ -443,8 +492,28 @@ export default function View3DBodyWidget(container, props) {
     if (skelData && ctx) {
       ctx.scene.remove(skelData.group);
       if (skelData.lineGeo) skelData.lineGeo.dispose();
+      if (skelData.octGeo) skelData.octGeo.dispose();
     }
     skelData = null;
+  }
+
+  // Unit octahedron bone: base at the origin, tip at (0,1,0), square bulge
+  // ring at 22% of the length. Scaled per bone to (width, length, width) for
+  // the classic mocap-rig look.
+  function makeBoneGeometry(R) {
+    var ring = 0.22;
+    var verts = new Float32Array([
+      0, 0, 0,   1, ring, 0,   0, ring, 1,   -1, ring, 0,   0, ring, -1,   0, 1, 0
+    ]);
+    var idx = new Uint16Array([
+      0, 2, 1, 0, 3, 2, 0, 4, 3, 0, 1, 4,
+      5, 1, 2, 5, 2, 3, 5, 3, 4, 5, 4, 1
+    ]);
+    var geo = new R.BufferGeometry();
+    geo.setAttribute("position", new R.BufferAttribute(verts, 3));
+    geo.setIndex(new R.BufferAttribute(idx, 1));
+    geo.computeVertexNormals();
+    return geo;
   }
 
   function buildSkeleton(data) {
@@ -453,33 +522,92 @@ export default function View3DBodyWidget(container, props) {
     var frames = data.frames || [];
     var bones = data.bones || [];
     var nJoints = Number(data.nJoints) || (frames.length ? Math.floor(frames[0].length / 3) : 0);
-    if (!frames.length || !nJoints) {
+    if (!frames.length || !nJoints || !bones.length) {
       statusEl.textContent = "empty skeleton";
       return;
     }
     if (Number(data.fps) > 0) state.fps = Number(data.fps);
+    var style = state.skeletonStyle || { bones: "octahedron", color: "rainbow_y" };
+
+    // Skeleton height range over the whole clip drives the rainbow-Y palette.
+    var minY = Infinity, maxY = -Infinity;
+    var f0 = frames[0];
+    for (var s = 1; s < f0.length; s += 3) {
+      minY = Math.min(minY, f0[s]);
+      maxY = Math.max(maxY, f0[s]);
+    }
+    var span = Math.max(0.001, maxY - minY);
+
+    function boneColor(a, b) {
+      if (style.color !== "rainbow_y") return new R.Color(0xb8b8b8);
+      var t = ((f0[a * 3 + 1] + f0[b * 3 + 1]) / 2 - minY) / span;
+      // Blue at the feet sweeping to red at the head, like the Comfy preview.
+      return new R.Color().setHSL(0.66 * (1 - t), 1.0, 0.55);
+    }
 
     var group = new R.Group();
-    // Bones as line segments (2 verts per bone), refreshed every frame.
-    var lineGeo = new R.BufferGeometry();
-    var linePos = new Float32Array(bones.length * 6);
-    lineGeo.setAttribute("position", new R.BufferAttribute(linePos, 3));
-    var lines = new R.LineSegments(lineGeo, new R.LineBasicMaterial({ color: 0x6fd6ff }));
-    lines.frustumCulled = false;
-    group.add(lines);
-    // Joints as small orange spheres.
-    var dotGeo = new R.SphereGeometry(0.014, 8, 8);
-    var dotMat = new R.MeshStandardMaterial({ color: 0xffb04a, roughness: 0.4 });
-    var dots = [];
-    for (var i = 0; i < nJoints; i++) {
-      var dot = new R.Mesh(dotGeo, dotMat);
-      dots.push(dot);
-      group.add(dot);
+    var octs = null;
+    var lineGeo = null, linePos = null, dots = null;
+    if (style.bones === "lines") {
+      lineGeo = new R.BufferGeometry();
+      linePos = new Float32Array(bones.length * 6);
+      var lineCol = new Float32Array(bones.length * 6);
+      for (var lb = 0; lb < bones.length; lb++) {
+        var lc = boneColor(bones[lb][0], bones[lb][1]);
+        for (var e = 0; e < 2; e++) {
+          lineCol[lb * 6 + e * 3] = lc.r;
+          lineCol[lb * 6 + e * 3 + 1] = lc.g;
+          lineCol[lb * 6 + e * 3 + 2] = lc.b;
+        }
+      }
+      lineGeo.setAttribute("position", new R.BufferAttribute(linePos, 3));
+      lineGeo.setAttribute("color", new R.BufferAttribute(lineCol, 3));
+      var lines = new R.LineSegments(lineGeo, new R.LineBasicMaterial({ vertexColors: true }));
+      lines.frustumCulled = false;
+      group.add(lines);
+      var dotGeo = new R.SphereGeometry(0.012, 8, 8);
+      var dotMat = new R.MeshStandardMaterial({ color: 0xffb04a, roughness: 0.4 });
+      dots = [];
+      for (var i = 0; i < nJoints; i++) {
+        var dot = new R.Mesh(dotGeo, dotMat);
+        dots.push(dot);
+        group.add(dot);
+      }
+    } else {
+      var octGeo = makeBoneGeometry(R);
+      octs = [];
+      for (var b = 0; b < bones.length; b++) {
+        var mat = new R.MeshStandardMaterial({
+          color: boneColor(bones[b][0], bones[b][1]),
+          roughness: 0.45,
+          metalness: 0.05,
+          flatShading: true
+        });
+        var m = new R.Mesh(octGeo, mat);
+        m.frustumCulled = false;
+        octs.push(m);
+        group.add(m);
+      }
     }
     ctx.scene.add(group);
-    skelData = { frames: frames, bones: bones, nJoints: nJoints, group: group, lineGeo: lineGeo, linePos: linePos, dots: dots };
+    skelData = {
+      frames: frames,
+      bones: bones,
+      nJoints: nJoints,
+      group: group,
+      lineGeo: lineGeo,
+      linePos: linePos,
+      dots: dots,
+      octs: octs,
+      octGeo: octs ? octs[0].geometry : null,
+      up: new R.Vector3(0, 1, 0),
+      dir: new R.Vector3()
+    };
 
-    // Skeleton-only node: the mesh/body/joints toggles and face cam don't apply.
+    // Skeleton mode: the mesh/body/joints toggles and face cam don't apply.
+    // buildMesh restores these when the node switches back to mesh mode.
+    face.on = false;
+    insetEl.style.display = "none";
     faceBtn.style.display = "none";
     bodyLabel.style.display = "none";
     if (meshToggle.parentElement) meshToggle.parentElement.style.display = "none";
@@ -489,17 +617,14 @@ export default function View3DBodyWidget(container, props) {
     frameSlider.max = String(Math.max(0, anim.nFrames - 1));
 
     // Frame the camera on the first pose.
-    var flat = frames[0];
-    var cx = 0, cy = 0, cz = 0, minY = Infinity, maxY = -Infinity;
-    for (var j = 0; j < flat.length; j += 3) {
-      cx += flat[j]; cy += flat[j + 1]; cz += flat[j + 2];
-      minY = Math.min(minY, flat[j + 1]);
-      maxY = Math.max(maxY, flat[j + 1]);
+    var cx = 0, cy = 0, cz = 0;
+    for (var j = 0; j < f0.length; j += 3) {
+      cx += f0[j]; cy += f0[j + 1]; cz += f0[j + 2];
     }
     ctx.orbit.cx = cx / nJoints;
     ctx.orbit.cy = cy / nJoints;
     ctx.orbit.cz = cz / nJoints;
-    ctx.orbit.dist = Math.max(1.5, (maxY - minY) * 2.2);
+    ctx.orbit.dist = Math.max(1.6, span * 2.0);
     ctx.applyCamera();
     setFrame(Math.min(anim.frame, anim.nFrames - 1));
   }
@@ -578,6 +703,11 @@ export default function View3DBodyWidget(container, props) {
     mesh.visible = meshToggle.checked;
     ctx.scene.add(mesh);
 
+    // Mesh mode: restore the controls that skeleton mode hides.
+    faceBtn.style.display = "";
+    if (meshToggle.parentElement) meshToggle.parentElement.style.display = "flex";
+    if (jointsToggle.parentElement) jointsToggle.parentElement.style.display = "flex";
+
     // Head-only index buffer: triangles whose three corners are all in the
     // head mask. Used by the "body" toggle to hide everything below the neck.
     var headIndex = null;
@@ -602,13 +732,13 @@ export default function View3DBodyWidget(container, props) {
     };
     anim.nFrames = Math.max(anim.nFrames, nFrames);
     frameSlider.max = String(Math.max(0, anim.nFrames - 1));
-    // Nodes spawned as a dedicated face viewer start in face-cam mode with the
-    // body hidden (head close-up only).
-    if (state.faceCam && state.faceTrack && !face.on) {
+    // The face close-up inset shows automatically whenever face-track data is
+    // available; the Face button toggles it and wins over the default.
+    if (state.faceTrack && !face.userSet) {
       setFaceMode(true);
-      if (headIndex) bodyToggle.checked = false;
+    } else if (face.on) {
+      updateFaceCam(anim.frame);
     }
-    applyBodyVisibility();
     setFrame(anim.frame);
   }
 
@@ -625,6 +755,28 @@ export default function View3DBodyWidget(container, props) {
       statusEl.textContent = "";
       return;
     }
+
+    // Mode switches (mesh <-> skeleton on the same node) drop URLs from the
+    // state; clear the stale scene objects so views don't stack up.
+    if (!state.skeletonUrl && skelData) {
+      clearSkeleton();
+      loadedSkelUrl = "";
+    }
+    if (!state.meshUrl && meshData) {
+      clearMesh();
+      loadedMeshUrl = "";
+    }
+    if (!state.jointsUrl && jointData.frames.length) {
+      clearJoints();
+      loadedJointsUrl = "";
+    }
+    anim.nFrames = Math.max(
+      meshData ? meshData.nFrames : 0,
+      jointData.frames.length,
+      skelData ? skelData.frames.length : 0
+    );
+    if (anim.frame >= anim.nFrames) anim.frame = 0;
+    frameSlider.max = String(Math.max(0, anim.nFrames - 1));
 
     if (state.skeletonUrl && state.skeletonUrl !== loadedSkelUrl) {
       statusEl.textContent = "skeleton: loading...";
@@ -700,7 +852,7 @@ export default function View3DBodyWidget(container, props) {
   });
   bodyToggle.addEventListener("change", function (e) {
     e.stopPropagation();
-    applyBodyVisibility();
+    // Read live by the face-inset render pass; nothing to rebuild.
   });
   jointsToggle.addEventListener("change", function (e) {
     e.stopPropagation();
@@ -708,6 +860,7 @@ export default function View3DBodyWidget(container, props) {
   });
   faceBtn.addEventListener("click", function (e) {
     e.stopPropagation();
+    face.userSet = true;
     setFaceMode(!face.on);
   });
   fullBtn.addEventListener("click", function (e) {
@@ -740,6 +893,22 @@ export default function View3DBodyWidget(container, props) {
     ctx.renderer.setSize(w, h, false);
     ctx.camera.aspect = w / h;
     ctx.camera.updateProjectionMatrix();
+    view.w = w;
+    view.h = h;
+    // Face inset: top-left corner, ~28% of the viewport width, portrait-ish.
+    var pad = 8;
+    var iw = Math.max(96, Math.min(Math.round(w * 0.28), 360));
+    var ih = Math.min(Math.round(iw * 1.1), Math.round(h * 0.55));
+    inset.x = pad;
+    inset.y = h - pad - ih; // WebGL viewport origin is bottom-left
+    inset.w = iw;
+    inset.h = ih;
+    ctx.faceCam.aspect = iw / ih;
+    ctx.faceCam.updateProjectionMatrix();
+    insetEl.style.left = pad + "px";
+    insetEl.style.top = pad + "px";
+    insetEl.style.width = iw + "px";
+    insetEl.style.height = ih + "px";
   }
 
   loadThree()

@@ -52,8 +52,8 @@
     "widgets": [
         {
             "name": "View3DBodyWidget",
-            "path": "View3DBodyWidget.v8.js",
-            "description": "three.js viewer: orbit/pan/zoom the recovered body and play or scrub the animation."
+            "path": "View3DBodyWidget.v12.js",
+            "description": "three.js viewer: orbit/pan/zoom the recovered body, play or scrub the animation, with a face close-up inset."
         }
     ],
     "nodes": [
@@ -71,7 +71,7 @@
             "file_path": "spawn_graph_node.py",
             "metadata": {
                 "category": "SAM3DBody",
-                "description": "Drop this node and click the button: it builds the complete ready-to-run graph (video in, overlay video + 3D viewer out) and removes itself.",
+                "description": "Drop this node and click the button: it builds the complete ready-to-run graph (video in, rendered video + 3D viewer + skeleton out) and removes itself.",
                 "display_name": "Build SAM 3D Body Graph"
             }
         },
@@ -94,30 +94,30 @@
             }
         },
         {
+            "class_name": "CreateSAM3DAnimationNode",
+            "file_path": "create_animation_node.py",
+            "metadata": {
+                "category": "SAM3DBody",
+                "description": "Comfy-style settings node: body mesh (default) or bone skeleton, bone look, smoothing, fps, camera translation. Wire its viewer output into a 3D Body Viewer.",
+                "display_name": "Create 3D Animation"
+            }
+        },
+        {
             "class_name": "ViewSAM3DBodyNode",
             "file_path": "view_3d_node.py",
             "metadata": {
                 "category": "SAM3DBody",
-                "description": "Interactive 3D viewer for the result: orbit, pan, zoom, and play or scrub the colored body animation.",
+                "description": "Interactive 3D viewer: plays what Create 3D Animation wires in - colored body mesh (with face mocap close-up inset) or octahedral bone skeleton. Orbit, pan, zoom, play or scrub.",
                 "display_name": "3D Body Viewer"
             }
         },
         {
-            "class_name": "ViewSAM3DFaceNode",
-            "file_path": "view_face_node.py",
+            "class_name": "RenderSAM3DPoseVideoNode",
+            "file_path": "render_pose_video_node.py",
             "metadata": {
                 "category": "SAM3DBody",
-                "description": "Face mocap close-up: a virtual camera rigged to the head follows the face every frame, like a VFX head-mounted cam.",
-                "display_name": "3D Face Close-Up Viewer"
-            }
-        },
-        {
-            "class_name": "ViewBVHSkeletonNode",
-            "file_path": "bvh_view_node.py",
-            "metadata": {
-                "category": "SAM3DBody",
-                "description": "Play a .bvh mocap file as an animated bone skeleton: wire bvh_path from One-Click, or view any external BVH (Mixamo, Rokoko...).",
-                "display_name": "BVH Skeleton Viewer"
+                "description": "Render the motion as a video, ComfyUI style: mesh overlay, OpenPose pose map, MHR skeleton, or white sticks - one style dropdown.",
+                "display_name": "Render Body Video"
             }
         },
         {

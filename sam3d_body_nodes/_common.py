@@ -157,11 +157,18 @@ def publish_file(path: Path) -> str:
     return publish_bytes(path.read_bytes(), filename)
 
 
-def build_viewer_state(pose_path: Path, glb_path: Path | None = None, lock_root: bool = True, face_cam: bool = False) -> dict:  # noqa: ARG001 - glb kept for API compat
+def build_viewer_state(
+    pose_path: Path,
+    glb_path: Path | None = None,  # noqa: ARG001 - kept for API compat
+    lock_root: bool = True,
+    face_cam: bool = False,
+    fps_override: float = 0.0,
+) -> dict:
     """Read a pose pack, publish joint animation JSON + per-frame mesh binary for the 3D widget.
 
     lock_root keeps the body centered at the origin every frame, so camera motion
-    in the source clip does not drag the body across the grid.
+    in the source clip does not drag the body across the grid. fps_override > 0
+    replaces the source fps for playback.
     """
     import json as _json
     import struct
@@ -188,6 +195,8 @@ def build_viewer_state(pose_path: Path, glb_path: Path | None = None, lock_root:
 
     n_frames = min(int(meta.get("n_frames") or joints.shape[0]), joints.shape[0])
     fps = float(meta.get("fps") or 24.0) or 24.0
+    if fps_override and float(fps_override) > 0:
+        fps = float(fps_override)
     flip = np.array([1.0, -1.0, -1.0], dtype=np.float32)
 
     world_j = (joints + cam_t[:, :, None, :]) * flip
@@ -309,6 +318,158 @@ def build_viewer_state(pose_path: Path, glb_path: Path | None = None, lock_root:
             state["faceTrack"] = {"headIdx": [int(i) for i in head_idx], "noseIdx": nose_idx}
 
     return state
+
+
+# MHR-70 keypoint bone links (from Meta's sam_3d_body/metadata/mhr70.py):
+# body, head fan (nose/eyes/ears), feet, and finger chains. Indices:
+# 0 nose, 1/2 eyes, 3/4 ears, 5/6 shoulders, 7/8 elbows, 9/10 hips,
+# 11/12 knees, 13/14 ankles, 15-20 toes/heels, 21-40 R fingers, 41 R wrist,
+# 42-61 L fingers, 62 L wrist, 69 neck.
+# Laid out as an OpenPose-style TREE routed through the neck (69): no
+# shoulder-shoulder / hip-hip / shoulder-hip lattice, which renders as a
+# solid triangle blob once the bones have volume.
+MHR70_BODY_BONES: list[tuple[int, int]] = [
+    (13, 11), (11, 9), (14, 12), (12, 10),
+    (69, 9), (69, 10),
+    (69, 5), (69, 6), (5, 7), (7, 62), (6, 8), (8, 41),
+]
+MHR70_HEAD_BONES: list[tuple[int, int]] = [(69, 0), (0, 1), (0, 2), (1, 3), (2, 4)]
+MHR70_FOOT_BONES: list[tuple[int, int]] = [(13, 17), (13, 15), (15, 16), (14, 20), (14, 18), (18, 19)]
+MHR70_HAND_CHAINS: list[list[int]] = [
+    [41, 24, 23, 22, 21], [41, 28, 27, 26, 25], [41, 32, 31, 30, 29], [41, 36, 35, 34, 33], [41, 40, 39, 38, 37],
+    [62, 45, 44, 43, 42], [62, 49, 48, 47, 46], [62, 53, 52, 51, 50], [62, 57, 56, 55, 54], [62, 61, 60, 59, 58],
+]
+
+
+def mhr70_bones(include_hands: bool = True) -> list[tuple[int, int]]:
+    bones = list(MHR70_BODY_BONES) + list(MHR70_HEAD_BONES) + list(MHR70_FOOT_BONES)
+    if include_hands:
+        for chain in MHR70_HAND_CHAINS:
+            bones += [(chain[i], chain[i + 1]) for i in range(len(chain) - 1)]
+    return bones
+
+
+def build_skeleton_state(
+    pose_path: Path,
+    lock_root: bool = True,
+    include_hands: bool = True,
+    smooth_window: int = 0,
+    fps_override: float = 0.0,
+) -> dict:
+    """Read a pose pack and publish the MHR-70 skeleton animation for the 3D widget.
+
+    Same world transform and grounding as build_viewer_state, but on the 70
+    canonical keypoints, with real anatomical bone connectivity. smooth_window
+    (frames, odd, >1) applies a temporal moving average to the keypoints;
+    fps_override > 0 replaces the source fps for playback.
+    """
+    import json as _json
+
+    import numpy as np
+
+    pose_file = Path(pose_path)
+    if pose_file.is_dir():
+        pose_file = pose_file / "pose_pack.npz"
+    if not pose_file.exists():
+        raise ValueError(f"Pose pack not found: {pose_file}")
+
+    with np.load(pose_file, allow_pickle=True) as packed:
+        meta = _json.loads(str(packed["meta_json"]))
+        kps = np.asarray(packed["pred_keypoints_3d"], dtype=np.float32)  # (F, P, 70, 3)
+        cam_t = np.asarray(packed["pred_cam_t"], dtype=np.float32)  # (F, P, 3)
+        present = np.asarray(packed["present"]).astype(bool)  # (F, P)
+
+    if kps.ndim != 4 or kps.shape[2] < 70:
+        raise ValueError("This pose pack has no MHR-70 keypoints; re-run prediction with the current library version.")
+
+    n_frames = min(int(meta.get("n_frames") or kps.shape[0]), kps.shape[0])
+    fps = float(meta.get("fps") or 24.0) or 24.0
+    flip = np.array([1.0, -1.0, -1.0], dtype=np.float32)
+    world = (kps + cam_t[:, :, None, :]) * flip  # (F, P, 70, 3)
+
+    # Per-frame XZ offset from the primary person's hip midpoint.
+    primary = np.full(n_frames, -1, dtype=np.int64)
+    offsets = np.zeros((n_frames, 3), dtype=np.float32)
+    held = np.zeros(3, dtype=np.float32)
+    have_held = False
+    for f in range(n_frames):
+        idx = np.argwhere(present[f]).reshape(-1)
+        if idx.size:
+            p0 = int(idx[0])
+            primary[f] = p0
+            pelvis = (world[f, p0, 9] + world[f, p0, 10]) * 0.5
+            held = np.array([pelvis[0], 0.0, pelvis[2]], dtype=np.float32)
+            have_held = True
+        offsets[f] = held if have_held else 0.0
+    if not lock_root:
+        valid = np.argwhere(primary >= 0).reshape(-1)
+        if valid.size:
+            offsets[:] = offsets[valid[0]]
+    world = world - offsets[:n_frames, None, None, :]
+
+    # Ground on a robust low percentile of the per-frame lowest keypoint
+    # (toe tips / heels are part of the 70, so this sits the feet on the grid).
+    ys = [world[f, p, :, 1].min() for f in range(n_frames) for p in np.argwhere(present[f]).reshape(-1)]
+    if ys:
+        world[..., 1] -= float(np.percentile(np.asarray(ys, dtype=np.float32), 5.0))
+
+    # Primary person only; hold the last pose when detection drops a frame.
+    poses = np.zeros((n_frames, world.shape[2], 3), dtype=np.float32)
+    last = None
+    for f in range(n_frames):
+        p0 = int(primary[f])
+        if p0 >= 0:
+            last = world[f, p0]
+        if last is not None:
+            poses[f] = last
+
+    # Optional temporal moving average over the keypoints (edge-padded so the
+    # clip keeps its length). Kills residual bone jitter at the cost of a
+    # little motion sharpness.
+    k = int(smooth_window or 0)
+    if k > 1 and n_frames > 2:
+        k = min(k | 1, 15)  # force odd, cap
+        pad = k // 2
+        padded = np.concatenate([poses[:1].repeat(pad, axis=0), poses, poses[-1:].repeat(pad, axis=0)], axis=0)
+        zero = np.zeros((1,) + padded.shape[1:], dtype=np.float64)
+        csum = np.concatenate([zero, np.cumsum(padded, axis=0, dtype=np.float64)], axis=0)
+        poses = ((csum[k:] - csum[:-k]) / float(k)).astype(np.float32)
+
+    if fps_override and float(fps_override) > 0:
+        fps = float(fps_override)
+
+    frames = [[round(float(v), 4) for v in pose.reshape(-1)] for pose in poses]
+    bones = mhr70_bones(include_hands=include_hands)
+    payload = {
+        "fps": fps,
+        "nJoints": int(world.shape[2]),
+        "bones": [[int(a), int(b)] for a, b in bones],
+        "frames": frames,
+    }
+    url = publish_bytes(_json.dumps(payload).encode("utf-8"), f"sam3d_skeleton_{uuid.uuid4().hex}.json")
+    return {"skeletonUrl": url, "fps": fps}
+
+
+def add_logs_group(node: Any) -> None:
+    """Add a "logs" output parameter inside a collapsed group.
+
+    Keeps nodes compact: the log box only shows when the user expands the
+    group. LogParameter's append/clear helpers keep working since the
+    parameter is still named "logs".
+    """
+    from griptape_nodes.exe_types.core_types import Parameter as _Parameter
+    from griptape_nodes.exe_types.core_types import ParameterGroup as _ParameterGroup
+    from griptape_nodes.exe_types.core_types import ParameterMode as _ParameterMode
+
+    with _ParameterGroup(name="Logs", collapsed=True) as logs_group:
+        _Parameter(
+            name="logs",
+            output_type="str",
+            allowed_modes={_ParameterMode.OUTPUT},
+            tooltip="Output log.",
+            ui_options={"multiline": True, "placeholder_text": ""},
+        )
+    node.add_node_element(logs_group)
 
 
 def command_to_pretty_string(command: list[str]) -> str:

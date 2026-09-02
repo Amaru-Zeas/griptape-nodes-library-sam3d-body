@@ -10,6 +10,7 @@ from griptape_nodes.exe_types.param_components.log_parameter import LogParameter
 try:
     from sam3d_body_nodes._common import (
         DEFAULT_HF_REPO,
+        add_logs_group,
         default_checkpoint_dir,
         default_repo_dir,
         default_venv_path,
@@ -20,6 +21,7 @@ try:
 except ImportError:
     from _common import (  # type: ignore
         DEFAULT_HF_REPO,
+        add_logs_group,
         default_checkpoint_dir,
         default_repo_dir,
         default_venv_path,
@@ -51,7 +53,7 @@ class LoadSAM3DBodyModelNode(ControlNode):
         self.add_parameter(Parameter(name="python_executable", input_types=["str"], type="str", default_value=str(venv_python(default_venv_path())), tooltip="Python from the SAM 3D Body venv."))
         self.add_parameter(Parameter(name="model_handle", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="JSON handle consumed by Predict / Detect / FoV nodes."))
         self.add_parameter(Parameter(name="status", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Resolved paths."))
-        self.log_params.add_output_parameters()
+        add_logs_group(self)
 
     def process(self) -> AsyncResult:
         yield lambda: self._process()

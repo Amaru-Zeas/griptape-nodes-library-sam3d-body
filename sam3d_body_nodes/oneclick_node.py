@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from griptape_nodes.exe_types.core_types import Parameter, ParameterMode
+from griptape_nodes.exe_types.core_types import Parameter, ParameterGroup, ParameterMode
 from griptape_nodes.exe_types.node_types import AsyncResult
 from griptape_nodes.traits.options import Options
 
@@ -113,12 +113,16 @@ class SAM3DBodyOneClickNode(SAM3DBodyWorkerNode):
                 ui_options={"hide_property": True},
             )
         )
-        self.add_parameter(Parameter(name="pose_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Pose pack written by the pipeline."))
-        self.add_parameter(Parameter(name="overlay_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Local overlay mp4."))
-        self.add_parameter(Parameter(name="glb_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Exported GLB/OBJ."))
-        self.add_parameter(Parameter(name="bvh_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Exported BVH."))
-        self.add_parameter(Parameter(name="glb_url", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Published GLB URL."))
-        self.add_parameter(Parameter(name="bvh_url", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Published BVH URL."))
+        # File outputs live in a collapsed group so the node stays compact;
+        # connections to them (pose_path -> viewers) work regardless.
+        with ParameterGroup(name="Output Files", collapsed=True) as outputs_group:
+            Parameter(name="pose_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Pose pack written by the pipeline.")
+            Parameter(name="overlay_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Local overlay mp4.")
+            Parameter(name="glb_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Exported GLB/OBJ.")
+            Parameter(name="bvh_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Exported BVH.")
+            Parameter(name="glb_url", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Published GLB URL.")
+            Parameter(name="bvh_url", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Published BVH URL.")
+        self.add_node_element(outputs_group)
         # Logs stay visible but always render last; the base class re-anchors it.
         self.move_logs_last()
 
@@ -127,6 +131,11 @@ class SAM3DBodyOneClickNode(SAM3DBodyWorkerNode):
 
     def _process(self) -> None:
         self.log_params.clear_logs()
+        # Publish the source video as an output IMMEDIATELY: media_input is a
+        # pass-through port (wired on to Render Body Video). Without this, the
+        # engine sees a connected output with no published value and re-runs
+        # this whole node (~1 min) every time a downstream node re-resolves.
+        self.parameter_output_values["media_input"] = self.get_parameter_value("media_input")
         media = artifact_to_local_path(self.required_media(self.get_parameter_value("media_input"), "media_input"))
         out_dir = self.out_dir() / "oneclick"
         args = [

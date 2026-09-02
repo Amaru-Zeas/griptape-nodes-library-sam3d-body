@@ -9,6 +9,11 @@ from griptape_nodes.exe_types.param_components.log_parameter import LogParameter
 from griptape_nodes.traits.options import Options
 
 try:
+    from sam3d_body_nodes._common import add_logs_group
+except ImportError:
+    from _common import add_logs_group  # type: ignore
+
+try:
     from griptape_nodes.exe_types.core_types import ParameterButtonGroup
     from griptape_nodes.exe_types.param_types.parameter_button import ParameterButton
 
@@ -52,20 +57,18 @@ DISPLAY_VIDEO_INPUT_PARAMS = ("video", "video_url", "media", "input", "value")
 # Canvas offsets and sizes (relative to the drop node) mirroring the hand-arranged
 # layout: Load Video left, One-Click center, Display Video top-right, View 3D
 # bottom-right. Format: (dx, dy, width, height); size None keeps the node default.
+# Offsets and sizes lifted 1:1 from the user's hand-arranged workflow
+# (sam_bodyflow.py), anchored on the Load Video node. Two ComfyUI-style rows:
+# Render Body Video -> Display Video on top, Create 3D Animation -> 3D Body
+# Viewer below, with the settings nodes in the middle column.
 COMPACT_LAYOUT = {
-    "setup": (0, -640, None, None),
-    "video": (0, 140, 520, 660),
-    "oneclick": (620, 0, 460, None),
-    # Right column sits well clear of the One-Click node so the connection
-    # lines between them stay visible.
-    "display": (1460, -40, 640, 620),
-    # Wide viewer: the 16:9 viewport is width-driven, so extra width = a much
-    # bigger 3D view. It intentionally dwarfs the video nodes.
-    "view3d": (1460, 660, 980, 880),
-    # Face mocap close-up viewer, below the body viewer.
-    "viewface": (1460, 1600, 700, 660),
-    # BVH skeleton viewer, below the face close-up.
-    "viewbvh": (1460, 2320, 700, 620),
+    "setup": (0, -1150, None, None),
+    "video": (0, 0, 1097, 900),
+    "oneclick": (1178, -71, 600, 1043),
+    "posevideo": (1924, -305, 606, 434),
+    "display": (2658, -613, 1209, 811),
+    "create3d": (1924, 405, None, None),
+    "view3d": (2658, 339, 1227, 840),
 }
 class DropSAM3DBodyGraphNode(ControlNode):
     """Drop this node, then click the button (or run it) to spawn the full wired pipeline."""
@@ -135,7 +138,7 @@ class DropSAM3DBodyGraphNode(ControlNode):
                 tooltip="Created node names.",
             )
         )
-        self.log_params.add_output_parameters()
+        add_logs_group(self)
 
     def _on_drop_clicked(self, *args, **kwargs) -> None:  # noqa: ARG002 - button callbacks receive extra args
         self._spawn()
@@ -313,9 +316,9 @@ class DropSAM3DBodyGraphNode(ControlNode):
             spawn("setup", "SAM3DBodySetupNode")
         # One-Click runs the whole pipeline; previews are separate connected nodes.
         spawn("oneclick", "SAM3DBodyOneClickNode")
+        spawn("create3d", "CreateSAM3DAnimationNode")
         spawn("view3d", "ViewSAM3DBodyNode")
-        spawn("viewface", "ViewSAM3DFaceNode")
-        spawn("viewbvh", "ViewBVHSkeletonNode")
+        spawn("posevideo", "RenderSAM3DPoseVideoNode")
 
         if bool(self.get_parameter_value("include_load_video")):
             video_name = self._create_candidate_node(
@@ -327,12 +330,12 @@ class DropSAM3DBodyGraphNode(ControlNode):
                 notes.append("No Load Video node type found; set media_input on the One-Click node yourself.")
 
         display_name = self._create_candidate_node(
-            engine, node_events, DISPLAY_VIDEO_CANDIDATES, f"SAM3D_overlay_{tag}", flow_name, metadata=meta("display")
+            engine, node_events, DISPLAY_VIDEO_CANDIDATES, f"SAM3D_video_out_{tag}", flow_name, metadata=meta("display")
         )
         if display_name:
             created["display"] = display_name
         else:
-            notes.append("No Display Video node type found; connect overlay_video to your own display node.")
+            notes.append("No Display Video node type found; connect the render node's video output to your own display node.")
 
         existing_setup = created.get("setup")
         if not existing_setup and bool(self.get_parameter_value("reuse_existing_setup")):
@@ -344,16 +347,22 @@ class DropSAM3DBodyGraphNode(ControlNode):
         # Data connections only; upstream nodes resolve automatically, no exec chain needed.
         if "video" in created:
             self._connect_first(engine, connection_cls, created["video"], VIDEO_SOURCE_PARAMS, created["oneclick"], "media_input", notes)
+        # The render node takes the source video FROM One-Click's media_input
+        # pass-through port, so the wire runs left -> right through the node
+        # instead of arcing over it from Load Video.
+        self._connect(engine, connection_cls, created["oneclick"], "media_input", created["posevideo"], "media_input", notes)
+        # ComfyUI-style rows: small settings node -> its own output node.
+        self._connect(engine, connection_cls, created["oneclick"], "pose_path", created["create3d"], "pose_path", notes)
+        self._connect(engine, connection_cls, created["create3d"], "viewer", created["view3d"], "viewer", notes)
+        self._connect(engine, connection_cls, created["oneclick"], "pose_path", created["posevideo"], "pose_path", notes)
+        # Pass the already-rendered overlay through so mesh style is instant.
+        self._connect(engine, connection_cls, created["oneclick"], "overlay_path", created["posevideo"], "overlay_path", notes)
         if "display" in created:
             for target_param in DISPLAY_VIDEO_INPUT_PARAMS:
-                if self._connect(engine, connection_cls, created["oneclick"], "overlay_video", created["display"], target_param, notes, optional=True):
+                if self._connect(engine, connection_cls, created["posevideo"], "video", created["display"], target_param, notes, optional=True):
                     break
             else:
-                notes.append("Could not wire overlay_video into the display node.")
-        self._connect(engine, connection_cls, created["oneclick"], "pose_path", created["view3d"], "pose_path", notes)
-        self._connect(engine, connection_cls, created["oneclick"], "glb_path", created["view3d"], "glb_path", notes)
-        self._connect(engine, connection_cls, created["oneclick"], "pose_path", created["viewface"], "pose_path", notes)
-        self._connect(engine, connection_cls, created["oneclick"], "bvh_path", created["viewbvh"], "bvh_path", notes)
+                notes.append("Could not wire the render node's video output into the display node.")
 
         # LAST step before handing the canvas back: re-assert every node's
         # planned position. Wiring connections (value pushes into display

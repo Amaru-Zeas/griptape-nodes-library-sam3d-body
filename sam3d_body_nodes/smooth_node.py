@@ -9,9 +9,9 @@ from griptape_nodes.exe_types.param_components.log_parameter import LogParameter
 from griptape_nodes.traits.options import Options
 
 try:
-    from sam3d_body_nodes._common import extract_input_text, load_pose_pack, save_pose_pack
+    from sam3d_body_nodes._common import add_logs_group, extract_input_text, load_pose_pack, save_pose_pack
 except ImportError:
-    from _common import extract_input_text, load_pose_pack, save_pose_pack  # type: ignore
+    from _common import add_logs_group, extract_input_text, load_pose_pack, save_pose_pack  # type: ignore
 
 
 class SmoothSAM3DBodyPoseNode(ControlNode):
@@ -34,7 +34,7 @@ class SmoothSAM3DBodyPoseNode(ControlNode):
         )
         self.add_parameter(Parameter(name="window", input_types=["int"], type="int", default_value=7, tooltip="Temporal window in frames. Odd values work best."))
         self.add_parameter(Parameter(name="smoothed_pose_path", output_type="str", allowed_modes={ParameterMode.OUTPUT}, tooltip="Smoothed pose pack path."))
-        self.log_params.add_output_parameters()
+        add_logs_group(self)
 
     def process(self) -> AsyncResult:
         yield lambda: self._process()

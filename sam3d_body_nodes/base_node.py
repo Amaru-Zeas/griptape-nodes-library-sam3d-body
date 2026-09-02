@@ -9,6 +9,7 @@ from griptape_nodes.exe_types.param_components.log_parameter import LogParameter
 
 try:
     from sam3d_body_nodes._common import (
+        add_logs_group,
         default_output_dir,
         default_repo_dir,
         default_venv_path,
@@ -19,6 +20,7 @@ try:
     )
 except ImportError:
     from _common import (  # type: ignore
+        add_logs_group,
         default_output_dir,
         default_repo_dir,
         default_venv_path,
@@ -71,16 +73,19 @@ class SAM3DBodyWorkerNode(ControlNode):
                 tooltip="Folder for pose packs, overlays, and exports.",
             )
         )
-        self.log_params.add_output_parameters()
+        # Logs live inside a collapsed group so nodes stay compact. The
+        # parameter must be CREATED inside the group (re-parenting an existing
+        # parameter into a group does not move it in the editor).
+        add_logs_group(self)
 
     def move_logs_last(self) -> None:
-        """Re-anchor the logs parameter to the bottom of the node.
+        """Re-anchor the collapsed Logs group to the bottom of the node.
 
-        The base class adds "logs" before subclass parameters; call this at the
+        The base class adds it before subclass parameters; call this at the
         end of a subclass __init__ so logs render last.
         """
         try:
-            element = self.root_ui_element.find_element_by_name("logs")
+            element = self.root_ui_element.find_element_by_name("Logs")
             if element is not None:
                 self.root_ui_element.remove_child(element)
                 self.root_ui_element.add_child(element)

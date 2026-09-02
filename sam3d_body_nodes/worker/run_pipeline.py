@@ -995,6 +995,166 @@ def cmd_render(args: argparse.Namespace) -> None:
     emit_result({"overlay_path": str(output_path), "n_frames": len(rendered), "fps": fps})
 
 
+# --- 2D pose (OpenPose-style) rendering --------------------------------------
+# Keypoint indices refer to Meta's MHR-70 set (sam_3d_body/metadata/mhr70.py):
+# 0 nose, 1/2 eyes, 3/4 ears, 5/6 shoulders, 7/8 elbows, 9/10 hips,
+# 11/12 knees, 13/14 ankles, 15-20 toes/heels, 21-40 right hand fingers,
+# 41 right wrist, 42-61 left hand fingers, 62 left wrist, 69 neck.
+
+# Classic OpenPose BODY_18 keypoint order, expressed as MHR-70 indices.
+OPENPOSE18_FROM_MHR70 = [0, 69, 6, 8, 41, 5, 7, 62, 10, 12, 14, 9, 11, 13, 2, 1, 4, 3]
+# Limb pairs in OpenPose-18 index space, with the canonical 18-color wheel.
+OPENPOSE_LIMBS = [
+    (1, 2), (1, 5), (2, 3), (3, 4), (5, 6), (6, 7), (1, 8), (8, 9), (9, 10),
+    (1, 11), (11, 12), (12, 13), (1, 0), (0, 14), (14, 15), (0, 16), (15, 17),
+]
+OPENPOSE_COLORS_RGB = [
+    (255, 0, 0), (255, 85, 0), (255, 170, 0), (255, 255, 0), (170, 255, 0),
+    (85, 255, 0), (0, 255, 0), (0, 255, 85), (0, 255, 170), (0, 255, 255),
+    (0, 170, 255), (0, 85, 255), (0, 0, 255), (85, 0, 255), (170, 0, 255),
+    (255, 0, 255), (255, 0, 170), (255, 0, 85),
+]
+# Feet, OpenPose BODY_25 style: ankle->heel, ankle->big toe, big->small toe.
+FOOT_LINKS_MHR70 = [(13, 17), (13, 15), (15, 16), (14, 20), (14, 18), (18, 19)]
+# Finger chains: wrist -> third joint -> second -> first -> tip, per finger.
+HAND_CHAINS_MHR70 = [
+    [41, 24, 23, 22, 21], [41, 28, 27, 26, 25], [41, 32, 31, 30, 29], [41, 36, 35, 34, 33], [41, 40, 39, 38, 37],
+    [62, 45, 44, 43, 42], [62, 49, 48, 47, 46], [62, 53, 52, 51, 50], [62, 57, 56, 55, 54], [62, 61, 60, 59, 58],
+]
+# Meta's own mhr70 skeleton colors (RGB), used by the "mhr" style.
+MHR_BODY_LINKS_RGB = [
+    ((13, 11), (0, 255, 0)), ((11, 9), (0, 255, 0)),
+    ((14, 12), (255, 128, 0)), ((12, 10), (255, 128, 0)),
+    ((9, 10), (51, 153, 255)), ((5, 9), (51, 153, 255)), ((6, 10), (51, 153, 255)), ((5, 6), (51, 153, 255)),
+    ((5, 7), (0, 255, 0)), ((7, 62), (0, 255, 0)),
+    ((6, 8), (255, 128, 0)), ((8, 41), (255, 128, 0)),
+]
+MHR_FACE_LINKS_RGB = [
+    ((1, 2), (51, 153, 255)), ((0, 1), (51, 153, 255)), ((0, 2), (51, 153, 255)),
+    ((1, 3), (51, 153, 255)), ((2, 4), (51, 153, 255)), ((3, 5), (51, 153, 255)), ((4, 6), (51, 153, 255)),
+]
+
+
+def _hand_edge_color_bgr(edge_index: int, n_edges: int) -> tuple[int, int, int]:
+    """OpenPose hand palette: hue sweeps the wheel across the 20 finger edges."""
+    hsv = np.uint8([[[int(179.0 * edge_index / max(1, n_edges)), 255, 255]]])
+    b, g, r = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0, 0]
+    return int(b), int(g), int(r)
+
+
+def _draw_pose_person(
+    canvas: np.ndarray,
+    kps: np.ndarray,
+    style: str,
+    stick_width: int,
+    marker_radius: int,
+    limb_alpha: float,
+    draw_hands: bool,
+    draw_face: bool,
+    scale: tuple[float, float],
+) -> None:
+    sx, sy = scale
+    pts = [(int(round(float(kps[i, 0]) * sx)), int(round(float(kps[i, 1]) * sy))) for i in range(kps.shape[0])]
+
+    def bgr(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
+        return (rgb[2], rgb[1], rgb[0])
+
+    if style == "openpose":
+        # Limbs as filled ellipses on an overlay, blended once per person so
+        # the result matches the classic ControlNet pose look.
+        overlay = canvas.copy()
+        op = [pts[i] for i in OPENPOSE18_FROM_MHR70]
+        for limb_idx, (a, b) in enumerate(OPENPOSE_LIMBS):
+            (x1, y1), (x2, y2) = op[a], op[b]
+            mx, my = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            length = float(np.hypot(x2 - x1, y2 - y1))
+            if length < 1.0:
+                continue
+            angle = float(np.degrees(np.arctan2(y2 - y1, x2 - x1)))
+            poly = cv2.ellipse2Poly((int(mx), int(my)), (int(length / 2), stick_width), int(angle), 0, 360, 1)
+            cv2.fillConvexPoly(overlay, poly, bgr(OPENPOSE_COLORS_RGB[limb_idx % 18]))
+        for (a, b) in FOOT_LINKS_MHR70:
+            cv2.line(overlay, pts[a], pts[b], bgr(OPENPOSE_COLORS_RGB[9]), thickness=stick_width)
+        cv2.addWeighted(overlay, limb_alpha, canvas, 1.0 - limb_alpha, 0, dst=canvas)
+        for kp_idx, p in enumerate(op):
+            cv2.circle(canvas, p, marker_radius, bgr(OPENPOSE_COLORS_RGB[kp_idx % 18]), thickness=-1)
+        if draw_hands:
+            for c_idx, chain in enumerate(HAND_CHAINS_MHR70):
+                for seg in range(4):
+                    color = _hand_edge_color_bgr(c_idx * 4 + seg, 40)
+                    cv2.line(canvas, pts[chain[seg]], pts[chain[seg + 1]], color, thickness=max(1, stick_width // 2))
+            for chain in HAND_CHAINS_MHR70:
+                for j in chain[1:]:
+                    cv2.circle(canvas, pts[j], max(1, marker_radius // 2), (0, 0, 255), thickness=-1)
+        return
+
+    # "mhr" (Meta's colors) and "white" share simple line drawing.
+    links: list[tuple[tuple[int, int], tuple[int, int, int]]] = list(MHR_BODY_LINKS_RGB)
+    links += [(pair, (0, 255, 0) if pair[0] in (13, 15) else (255, 128, 0)) for pair in FOOT_LINKS_MHR70]
+    if draw_face:
+        links += MHR_FACE_LINKS_RGB
+    if draw_hands:
+        finger_colors = [(255, 128, 0), (255, 153, 255), (102, 178, 255), (255, 51, 51), (0, 255, 0)]
+        for c_idx, chain in enumerate(HAND_CHAINS_MHR70):
+            for seg in range(4):
+                links.append(((chain[seg], chain[seg + 1]), finger_colors[c_idx % 5]))
+    for (a, b), rgb in links:
+        color = (255, 255, 255) if style == "white" else bgr(rgb)
+        cv2.line(canvas, pts[a], pts[b], color, thickness=stick_width)
+    joint_color = (255, 255, 255) if style == "white" else bgr((51, 153, 255))
+    body_and_feet = set(OPENPOSE18_FROM_MHR70) | {15, 16, 17, 18, 19, 20}
+    for i in sorted(body_and_feet):
+        cv2.circle(canvas, pts[i], marker_radius, joint_color, thickness=-1)
+
+
+def cmd_render_pose(args: argparse.Namespace) -> None:
+    """Render the recovered pose as a 2D skeleton video (OpenPose-style)."""
+    pack = load_pose_pack(Path(args.pose_path))
+    meta = pack["meta"]
+    k2d = np.asarray(pack["pred_keypoints_2d"], dtype=np.float32)  # (F, P, 70, 2)
+    present = np.asarray(pack["present"]).astype(bool)
+    fps = float(meta.get("fps") or 24.0) or 24.0
+    src_h, src_w = (int(v) for v in meta.get("image_size") or (1080, 1920))
+
+    bg_frames: list[np.ndarray] | None = None
+    out_h, out_w = src_h, src_w
+    if args.pose_background == "source":
+        if not args.input:
+            raise ValueError("pose_background=source needs --input (the source video).")
+        bg_frames, _bg_fps, (out_h, out_w) = load_frames(Path(args.input), max_frames=args.max_frames)
+    scale = (out_w / max(1, src_w), out_h / max(1, src_h))
+
+    n = min(k2d.shape[0], int(meta.get("n_frames") or k2d.shape[0]))
+    if bg_frames is not None:
+        n = min(n, len(bg_frames))
+    if args.max_frames > 0:
+        n = min(n, args.max_frames)
+
+    rendered: list[np.ndarray] = []
+    for f in range(n):
+        canvas = bg_frames[f].copy() if bg_frames is not None else np.zeros((out_h, out_w, 3), dtype=np.uint8)
+        for p in range(k2d.shape[1]):
+            if not present[f, p]:
+                continue
+            _draw_pose_person(
+                canvas,
+                k2d[f, p],
+                style=args.pose_style,
+                stick_width=max(1, int(args.stick_width)),
+                marker_radius=max(1, int(args.marker_radius)),
+                limb_alpha=min(1.0, max(0.05, float(args.limb_alpha))),
+                draw_hands=not args.no_hands,
+                draw_face=not args.no_face,
+                scale=scale,
+            )
+        rendered.append(canvas)
+        if (f + 1) % 100 == 0:
+            print(f"pose_frame {f + 1}/{n}", flush=True)
+    output_path = Path(args.output)
+    write_video(output_path, rendered, fps)
+    emit_result({"pose_video_path": str(output_path), "n_frames": len(rendered), "fps": fps})
+
+
 # MHR expr axis -> ARKit blendshape driver(s). MHR's 72 expression axes are
 # unnamed upstream; which axis maps to which ARKit shape is a fact about
 # Meta's model, established empirically by the ComfyUI SAM 3D Body integration.
@@ -1706,7 +1866,7 @@ def cmd_pipeline(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="GTN SAM 3D Body worker")
-    parser.add_argument("command", choices=["download", "detect", "fov", "predict", "smooth", "face", "render", "export", "pipeline", "serve"])
+    parser.add_argument("command", choices=["download", "detect", "fov", "predict", "smooth", "face", "render", "render_pose", "export", "pipeline", "serve"])
     parser.add_argument("--input", default="")
     parser.add_argument("--output", default="")
     parser.add_argument("--pose-path", dest="pose_path", default="")
@@ -1741,6 +1901,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=16)
     parser.add_argument("--foot-lock", dest="foot_lock", action="store_true")
     parser.add_argument("--daemon-state", dest="daemon_state", default="")
+    parser.add_argument("--pose-style", dest="pose_style", default="openpose", choices=["openpose", "mhr", "white"])
+    parser.add_argument("--pose-background", dest="pose_background", default="black", choices=["black", "source"])
+    parser.add_argument("--stick-width", dest="stick_width", type=int, default=4)
+    parser.add_argument("--marker-radius", dest="marker_radius", type=int, default=4)
+    parser.add_argument("--limb-alpha", dest="limb_alpha", type=float, default=0.6)
+    parser.add_argument("--no-hands", dest="no_hands", action="store_true")
+    parser.add_argument("--no-face", dest="no_face", action="store_true")
     return parser
 
 
@@ -1868,6 +2035,7 @@ COMMANDS = {
     "smooth": cmd_smooth,
     "face": cmd_face,
     "render": cmd_render,
+    "render_pose": cmd_render_pose,
     "export": cmd_export,
     "pipeline": cmd_pipeline,
     "serve": cmd_serve,

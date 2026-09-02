@@ -22,16 +22,17 @@ Installs Meta's model in its own isolated environment and downloads the checkpoi
 Takes 10-20 minutes and needs an NVIDIA GPU. Watch the logs on the node.
 
 **3. Drop "Build SAM 3D Body Graph" and click the button**
-It spawns a ready-wired graph (video in -> overlay video + 3D body viewer +
-3D face close-up viewer + BVH skeleton viewer) and removes itself.
+It spawns a ready-wired graph (video in -> Render Body Video + 3D Body Viewer)
+and removes itself.
 
 **4. Load a video and run**
 Pick a clip with one clearly visible person, then run the One-Click node.
 
-**You get:** a mesh-overlay video, an interactive 3D viewer (orbit / pan / zoom,
-fullscreen, rainbow body colors + face expressions), a face mocap close-up viewer
-(camera locked to the head, like a VFX head-cam), an animated bone-skeleton
-viewer, and GLB / BVH files for Blender or Unreal.
+**You get:** a rendered video with a style dropdown (mesh overlay / OpenPose
+pose map / MHR skeleton / white sticks - like ComfyUI), a "Create 3D
+Animation" settings node feeding an interactive 3D viewer (colored body mesh
+with face mocap close-up inset by default, or rainbow octahedral bone
+skeleton), and GLB / BVH files for Blender or Unreal.
 
 **Speed**
 - The first run loads the model (~20 s extra); after that a warm worker keeps it
@@ -42,12 +43,15 @@ viewer, and GLB / BVH files for Blender or Unreal.
   perfect fingers.
 
 **Viewers**
-- Fullscreen button on every viewer; "Face" button switches any viewer to the
-  head-locked mocap cam (camera follows the head, mouse control disabled);
-  the "body" checkbox hides everything below the neck.
-- Normal mode: drag = orbit, middle-mouse or Shift+drag = pan, wheel = zoom.
-- "BVH Skeleton Viewer" plays the exported .bvh as animated bones - and it
-  opens any external BVH too (Mixamo, Rokoko, ...): just set its `bvh_path`.
+- Drag = orbit, middle-mouse or Shift+drag = pan, wheel = zoom, plus fullscreen.
+- The face mocap close-up shows as an inset in the top-left corner (camera
+  locked to the head, like a VFX head-cam). The "Face" button toggles it;
+  the "body" checkbox shows/hides the body in the close-up.
+- "Create 3D Animation" (before the 3D viewer, like Comfy) picks what plays:
+  `mesh_style` body_mesh or bones_only, bone look/color, `bone_smooth_window`,
+  playback `fps`, and `camera_translation`. Re-run it after changing options.
+- "Render Body Video" is the one video output: pick mesh / openpose / mhr /
+  white in its style dropdown (skeleton styles draw on black or the source).
 
 **Tips**
 - Jittery result? Raise `smooth_strength` to 2-3 and `smooth_window` to 9-13.
