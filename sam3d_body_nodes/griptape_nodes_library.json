@@ -1,0 +1,196 @@
+{
+    "name": "GTN SAM 3D Body",
+    "library_schema_version": "0.1.0",
+    "metadata": {
+        "author": "Griptape Community",
+        "description": "Meta SAM 3D Body for Griptape Nodes: turn a video of a person into a 3D body animation. One-click pipeline with mesh overlay video, interactive 3D viewer, face expressions, and GLB/BVH export. Advanced nodes expose every pipeline stage.",
+        "library_version": "0.1.0",
+        "engine_version": "0.67.0",
+        "tags": [
+            "Griptape",
+            "SAM3D",
+            "Body",
+            "Mocap",
+            "3D",
+            "Video"
+        ],
+        "dependencies": {
+            "pip_dependencies": [
+                "numpy>=1.26.0"
+            ]
+        }
+    },
+    "settings": [
+        {
+            "description": "Hugging Face token for gated SAM 3D Body checkpoints",
+            "category": "app_events.on_app_initialization_complete",
+            "contents": {
+                "secrets_to_register": [
+                    "HF_TOKEN"
+                ]
+            }
+        }
+    ],
+    "categories": [
+        {
+            "SAM3DBody": {
+                "color": "border-amber-500",
+                "title": "SAM 3D Body",
+                "description": "Video to 3D body animation. Start here: run Setup once, then Build Graph.",
+                "icon": "PersonStanding"
+            }
+        },
+        {
+            "SAM3DBodyAdvanced": {
+                "color": "border-amber-700",
+                "title": "SAM 3D Body - Advanced",
+                "description": "Individual pipeline stages for building custom graphs",
+                "icon": "Settings"
+            }
+        }
+    ],
+    "widgets": [
+        {
+            "name": "View3DBodyWidget",
+            "path": "View3DBodyWidget.v7.js",
+            "description": "three.js viewer: orbit/pan/zoom the recovered body and play or scrub the animation."
+        }
+    ],
+    "nodes": [
+        {
+            "class_name": "SAM3DBodyInstructionsNode",
+            "file_path": "instructions_node.py",
+            "metadata": {
+                "category": "SAM3DBody",
+                "description": "Start here: how to set up and use this library, step by step.",
+                "display_name": "Instructions"
+            }
+        },
+        {
+            "class_name": "DropSAM3DBodyGraphNode",
+            "file_path": "spawn_graph_node.py",
+            "metadata": {
+                "category": "SAM3DBody",
+                "description": "Drop this node and click the button: it builds the complete ready-to-run graph (video in, overlay video + 3D viewer out) and removes itself.",
+                "display_name": "Build SAM 3D Body Graph"
+            }
+        },
+        {
+            "class_name": "SAM3DBodySetupNode",
+            "file_path": "setup_node.py",
+            "metadata": {
+                "category": "SAM3DBody",
+                "description": "One-time install: clones Meta's sam-3d-body repo, creates a CUDA venv, and downloads the model checkpoints. Run this first.",
+                "display_name": "SAM 3D Body Setup"
+            }
+        },
+        {
+            "class_name": "SAM3DBodyOneClickNode",
+            "file_path": "oneclick_node.py",
+            "metadata": {
+                "category": "SAM3DBody",
+                "description": "The whole pipeline in one node: video in, then predict, face expressions, smooth, overlay video, and GLB/BVH export.",
+                "display_name": "SAM 3D Body (One-Click)"
+            }
+        },
+        {
+            "class_name": "ViewSAM3DBodyNode",
+            "file_path": "view_3d_node.py",
+            "metadata": {
+                "category": "SAM3DBody",
+                "description": "Interactive 3D viewer for the result: orbit, pan, zoom, and play or scrub the colored body animation.",
+                "display_name": "3D Body Viewer"
+            }
+        },
+        {
+            "class_name": "ViewSAM3DFaceNode",
+            "file_path": "view_face_node.py",
+            "metadata": {
+                "category": "SAM3DBody",
+                "description": "Face mocap close-up: a virtual camera rigged to the head follows the face every frame, like a VFX head-mounted cam.",
+                "display_name": "3D Face Close-Up Viewer"
+            }
+        },
+        {
+            "class_name": "LoadSAM3DBodyModelNode",
+            "file_path": "load_model_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Resolve checkpoint + MHR asset paths into a reusable model handle for the other advanced nodes.",
+                "display_name": "Load SAM 3D Body Model"
+            }
+        },
+        {
+            "class_name": "DetectPersonBoxesNode",
+            "file_path": "detect_boxes_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Detect a bounding box around each person in every frame. Optional, but improves accuracy a lot.",
+                "display_name": "Detect Person Boxes"
+            }
+        },
+        {
+            "class_name": "SAM3DBodyVideoTrackNode",
+            "file_path": "video_track_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Give each person a stable ID across frames. Practically required for multi-person clips.",
+                "display_name": "Track People Across Frames"
+            }
+        },
+        {
+            "class_name": "ExtractFoVFromMoGeNode",
+            "file_path": "fov_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Estimate the camera's vertical field of view with MoGe for better alignment with the source video.",
+                "display_name": "Estimate Camera FoV (MoGe)"
+            }
+        },
+        {
+            "class_name": "RunSAM3DBodyPredictionNode",
+            "file_path": "predict_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Run SAM 3D Body mesh recovery on an image or video and write the pose pack.",
+                "display_name": "Predict 3D Body Pose"
+            }
+        },
+        {
+            "class_name": "SmoothSAM3DBodyPoseNode",
+            "file_path": "smooth_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Temporally smooth the pose animation to reduce frame-to-frame jitter.",
+                "display_name": "Smooth Pose Animation"
+            }
+        },
+        {
+            "class_name": "SAM3DBodyFaceExpressionNode",
+            "file_path": "face_expression_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Track mouth/brow/eye motion with MediaPipe and bake it into the body mesh (SAM 3D Body alone has a static face).",
+                "display_name": "Add Face Expressions"
+            }
+        },
+        {
+            "class_name": "RenderSAM3DBodyPoseNode",
+            "file_path": "render_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Render the recovered 3D mesh over the source video as an overlay mp4.",
+                "display_name": "Render Mesh Overlay Video"
+            }
+        },
+        {
+            "class_name": "Create3DAnimationFileNode",
+            "file_path": "export_animation_node.py",
+            "metadata": {
+                "category": "SAM3DBodyAdvanced",
+                "description": "Export the animation as a GLB mesh, BVH mocap file, or both.",
+                "display_name": "Export Animation (GLB / BVH)"
+            }
+        }
+    ]
+}
