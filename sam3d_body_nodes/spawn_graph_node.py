@@ -65,10 +65,6 @@ COMPACT_LAYOUT = {
     # Face mocap close-up viewer, below the body viewer.
     "viewface": (1460, 1600, 700, 660),
 }
-
-# Group frame padding around the members and headroom for its title bar.
-GROUP_PAD = 80
-GROUP_HEADER = 120
 class DropSAM3DBodyGraphNode(ControlNode):
     """Drop this node, then click the button (or run it) to spawn the full wired pipeline."""
 
@@ -268,11 +264,6 @@ class DropSAM3DBodyGraphNode(ControlNode):
             except Exception as exc:
                 notes.append(f"Auto-layout skipped: {exc}")
 
-        member_names = [name for key, name in created.items() if not key.startswith("_")]
-        group_name = self._group_nodes(engine, node_events, "SAM 3D Body", member_names, flow_name, notes)
-        if group_name:
-            created["_group"] = group_name
-
         created_text = ", ".join(f"{key}={name}" for key, name in created.items() if not key.startswith("_"))
         status = f"Dropped {variant} SAM 3D Body graph ({len(created)} nodes)."
         self.parameter_output_values["status"] = status
@@ -297,23 +288,9 @@ class DropSAM3DBodyGraphNode(ControlNode):
 
         include_setup = bool(self.get_parameter_value("include_setup"))
 
-        # Group frame FIRST, sized from the planned layout, so every node can be
-        # created directly inside it (parent_group_name) - that is how the
-        # editor parents nodes, and the only way the frame drags them along.
-        planned = [key for key in COMPACT_LAYOUT if key != "setup" or include_setup]
-        group_name, group_origin = self._create_group_frame(engine, node_events, "SAM 3D Body", planned, base_x, base_y, flow_name, notes)
-        if group_name:
-            created["_group"] = group_name
-
-        def meta(key: str, absolute: bool = False) -> dict[str, Any]:
+        def meta(key: str) -> dict[str, Any]:
             dx, dy, width, height = COMPACT_LAYOUT.get(key, (0, 0, None, None))
-            x, y = base_x + dx, base_y + dy
-            if not absolute and group_name and group_origin:
-                # The editor positions group members RELATIVE to the group
-                # frame, not in canvas coordinates.
-                x -= group_origin[0]
-                y -= group_origin[1]
-            data: dict[str, Any] = {"position": {"x": x, "y": y}}
+            data: dict[str, Any] = {"position": {"x": base_x + dx, "y": base_y + dy}}
             if width and height:
                 data["size"] = {"width": width, "height": height}
             return data
@@ -326,7 +303,6 @@ class DropSAM3DBodyGraphNode(ControlNode):
                 node_name=f"SAM3D_{key}_{tag}",
                 flow_name=flow_name,
                 metadata=meta(key),
-                parent_group=group_name or None,
             )
             created[key] = name
             return name
@@ -338,13 +314,9 @@ class DropSAM3DBodyGraphNode(ControlNode):
         spawn("view3d", "ViewSAM3DBodyNode")
         spawn("viewface", "ViewSAM3DFaceNode")
 
-        # The video nodes are created inside the group like everything else:
-        # only creation-time parenting makes the editor truly attach a node to
-        # the frame (a later membership add updates the backend but the open
-        # canvas does not pick it up).
         if bool(self.get_parameter_value("include_load_video")):
             video_name = self._create_candidate_node(
-                engine, node_events, VIDEO_NODE_CANDIDATES, f"SAM3D_video_{tag}", flow_name, metadata=meta("video"), parent_group=group_name or None
+                engine, node_events, VIDEO_NODE_CANDIDATES, f"SAM3D_video_{tag}", flow_name, metadata=meta("video")
             )
             if video_name:
                 created["video"] = video_name
@@ -352,28 +324,12 @@ class DropSAM3DBodyGraphNode(ControlNode):
                 notes.append("No Load Video node type found; set media_input on the One-Click node yourself.")
 
         display_name = self._create_candidate_node(
-            engine, node_events, DISPLAY_VIDEO_CANDIDATES, f"SAM3D_overlay_{tag}", flow_name, metadata=meta("display"), parent_group=group_name or None
+            engine, node_events, DISPLAY_VIDEO_CANDIDATES, f"SAM3D_overlay_{tag}", flow_name, metadata=meta("display")
         )
         if display_name:
             created["display"] = display_name
         else:
             notes.append("No Display Video node type found; connect overlay_video to your own display node.")
-
-        # Ground truth: ask the GROUP who its members are, rather than trusting
-        # per-create results. Anything the engine failed to parent gets moved
-        # to its ABSOLUTE canvas position (the editor converts canvas ->
-        # group-relative while processing the add) and one membership request.
-        if group_name:
-            members = self._group_members(engine, group_name)
-            missing = [name for key, name in created.items() if not key.startswith("_") and name not in members]
-            if missing:
-                name_to_key = {name: key for key, name in created.items()}
-                for member in missing:
-                    key = name_to_key.get(member)
-                    if key in COMPACT_LAYOUT:
-                        self._set_node_position(engine, node_events, member, meta(key, absolute=True)["position"], notes)
-                self._add_nodes_to_group(engine, node_events, group_name, missing, flow_name, notes)
-                notes.append(f"Grouped after creation (may need a canvas reload to drag along): {', '.join(missing)}")
 
         existing_setup = created.get("setup")
         if not existing_setup and bool(self.get_parameter_value("reuse_existing_setup")):
@@ -395,6 +351,15 @@ class DropSAM3DBodyGraphNode(ControlNode):
         self._connect(engine, connection_cls, created["oneclick"], "glb_path", created["view3d"], "glb_path", notes)
         self._connect(engine, connection_cls, created["oneclick"], "pose_path", created["viewface"], "pose_path", notes)
 
+        # LAST step before handing the canvas back: re-assert every node's
+        # planned position. Wiring connections (value pushes into display
+        # nodes) has been observed to reset a node's position, so this must
+        # run after all connects.
+        for key, name in created.items():
+            if key.startswith("_") or key not in COMPACT_LAYOUT:
+                continue
+            self._set_node_position(engine, node_events, name, meta(key)["position"], notes)
+
         created_text = ", ".join(f"{key}={name}" for key, name in created.items() if not key.startswith("_"))
         status = f"Dropped compact SAM 3D Body graph ({len([k for k in created if not k.startswith('_')])} nodes)."
         self.parameter_output_values["status"] = status
@@ -410,108 +375,6 @@ class DropSAM3DBodyGraphNode(ControlNode):
         except Exception as exc:
             self.log_params.append_to_logs(f"Could not remove drop node: {exc}\n")
 
-    def _group_frame_metadata(self, x1: float, y1: float, x2: float, y2: float) -> dict[str, Any]:
-        """Metadata for the standard black semi-transparent Group frame covering the given bounds."""
-        size = {"width": int(x2 - x1) + 2 * GROUP_PAD, "height": int(y2 - y1) + 2 * GROUP_PAD + GROUP_HEADER}
-        return {
-            "library": "Griptape Nodes Library",
-            "node_type": "Group",
-            "is_node_group": True,
-            "executable": False,
-            "hideaddparameter": True,
-            "showConnectionsCollapsed": True,
-            "group_settings_params": ["description"],
-            "color": "#000000",
-            "opacity": 0.4,
-            "position": {"x": int(x1) - GROUP_PAD, "y": int(y1) - GROUP_PAD - GROUP_HEADER},
-            "size": size,
-            "expanded_dimensions": dict(size),
-        }
-
-    def _create_group_frame(
-        self,
-        engine: Any,
-        node_events: Any,
-        title: str,
-        planned_keys: list[str],
-        base_x: int,
-        base_y: int,
-        flow_name: str | None,
-        notes: list[str],
-    ) -> tuple[str, tuple[int, int] | None]:
-        """Create the (empty) Group frame first, sized from the planned layout,
-        so nodes can be created directly inside it via parent_group_name.
-
-        Returns the group name and the frame's canvas origin (top-left); child
-        positions must be expressed relative to that origin."""
-        x1 = y1 = x2 = y2 = None
-        for key in planned_keys:
-            dx, dy, width, height = COMPACT_LAYOUT.get(key, (0, 0, None, None))
-            width = width or 460
-            height = height or 620
-            nx, ny = base_x + dx, base_y + dy
-            x1 = nx if x1 is None else min(x1, nx)
-            y1 = ny if y1 is None else min(y1, ny)
-            x2 = nx + width if x2 is None else max(x2, nx + width)
-            y2 = ny + height if y2 is None else max(y2, ny + height)
-        if x1 is None:
-            return "", None
-        origin = (int(x1) - GROUP_PAD, int(y1) - GROUP_PAD - GROUP_HEADER)
-        kwargs: dict[str, Any] = {
-            "node_type": "Group",
-            "specific_library_name": "Griptape Nodes Library",
-            "node_name": title,
-            "metadata": self._group_frame_metadata(x1, y1, x2, y2),
-        }
-        if flow_name:
-            kwargs["override_parent_flow_name"] = flow_name
-        try:
-            result = engine.handle_request(node_events.CreateNodeRequest(**kwargs))
-            if hasattr(result, "failed") and result.failed():
-                raise ValueError(getattr(result, "result_details", "") or "group creation failed")
-            return str(getattr(result, "node_name", None) or title), origin
-        except Exception as exc:
-            notes.append(f"Could not create group frame: {exc}")
-            return "", None
-
-    def _add_nodes_to_group(
-        self,
-        engine: Any,
-        node_events: Any,
-        group_name: str,
-        member_names: list[str],
-        flow_name: str | None,
-        notes: list[str],
-    ) -> bool:
-        """Explicit group membership request (the mechanism the editor uses)."""
-        try:
-            add_cls = getattr(node_events, "AddNodesToNodeGroupRequest", None)
-            if add_cls is None:
-                notes.append("Engine has no AddNodesToNodeGroupRequest; group is visual only.")
-                return False
-            add_kwargs: dict[str, Any] = {"node_names": list(member_names), "node_group_name": group_name}
-            if flow_name:
-                add_kwargs["flow_name"] = flow_name
-            result = engine.handle_request(add_cls(**add_kwargs))
-            if hasattr(result, "failed") and result.failed():
-                notes.append(f"Group membership failed: {getattr(result, 'result_details', '')}")
-                return False
-            return True
-        except Exception as exc:
-            notes.append(f"Group membership failed: {exc}")
-            return False
-
-    def _group_members(self, engine: Any, group_name: str) -> set[str]:
-        """The group's own membership list (metadata node_names_in_group)."""
-        try:
-            from griptape_nodes.retained_mode.events.node_events import GetNodeMetadataRequest
-
-            result = engine.handle_request(GetNodeMetadataRequest(node_name=group_name))
-            meta = getattr(result, "metadata", None) or {}
-            return set(meta.get("node_names_in_group") or [])
-        except Exception:
-            return set()
-
     def _set_node_position(self, engine: Any, node_events: Any, node_name: str, position: dict[str, Any], notes: list[str]) -> None:
         """Rewrite one node's canvas position, preserving the rest of its metadata."""
         get_cls = getattr(node_events, "GetNodeMetadataRequest", None)
@@ -525,120 +388,6 @@ class DropSAM3DBodyGraphNode(ControlNode):
         except Exception as exc:
             notes.append(f"Could not reposition {node_name}: {exc}")
 
-    def _shift_members_relative(self, engine: Any, node_events: Any, member_names: list[str], origin: tuple[int, int], notes: list[str]) -> None:
-        """Rewrite members' positions from canvas coordinates to group-relative
-        (the editor renders group members relative to the frame's origin)."""
-        get_cls = getattr(node_events, "GetNodeMetadataRequest", None)
-        set_cls = getattr(node_events, "SetNodeMetadataRequest", None)
-        if get_cls is None or set_cls is None:
-            notes.append("Engine lacks node metadata requests; grouped nodes may render offset.")
-            return
-        for name in member_names:
-            try:
-                meta = dict(getattr(engine.handle_request(get_cls(node_name=name)), "metadata", None) or {})
-                position = dict(meta.get("position") or {})
-                position["x"] = float(position.get("x", 0)) - origin[0]
-                position["y"] = float(position.get("y", 0)) - origin[1]
-                meta["position"] = position
-                engine.handle_request(set_cls(node_name=name, metadata=meta))
-            except Exception as exc:
-                notes.append(f"Could not reposition {name} inside group: {exc}")
-
-    def _nodes_bounds(self, engine: Any, member_names: list[str]) -> tuple[int, int, int, int] | None:
-        """Bounding box (x1, y1, x2, y2) of the members on the canvas."""
-        try:
-            from griptape_nodes.retained_mode.events.node_events import GetNodeMetadataRequest
-        except Exception:
-            return None
-        x1 = y1 = None
-        x2 = y2 = None
-        for name in member_names:
-            try:
-                result = engine.handle_request(GetNodeMetadataRequest(node_name=name))
-                meta = getattr(result, "metadata", None) or {}
-                position = meta.get("position") or {}
-                size = meta.get("size") or {}
-                x = float(position.get("x", 0))
-                y = float(position.get("y", 0))
-                w = float(size.get("width") or 460)
-                h = float(size.get("height") or 620)
-            except Exception:
-                continue
-            x1 = x if x1 is None else min(x1, x)
-            y1 = y if y1 is None else min(y1, y)
-            x2 = x + w if x2 is None else max(x2, x + w)
-            y2 = y + h if y2 is None else max(y2, y + h)
-        if x1 is None:
-            return None
-        return (int(x1), int(y1), int(x2), int(y2))
-
-    def _group_nodes(
-        self,
-        engine: Any,
-        node_events: Any,
-        group_name: str,
-        member_names: list[str],
-        flow_name: str | None,
-        notes: list[str],
-    ) -> str:
-        """Wrap the spawned nodes in the standard organizational Group frame
-        (the black semi-transparent one), sized to fit around them. Purely
-        cosmetic, so any failure is logged and ignored."""
-        if not member_names:
-            return ""
-        bounds = self._nodes_bounds(engine, member_names)
-        if bounds is None:
-            bounds = (0, 0, 460, 620)
-        metadata = self._group_frame_metadata(*bounds)
-        kwargs: dict[str, Any] = {
-            "node_type": "Group",
-            "specific_library_name": "Griptape Nodes Library",
-            "node_name": group_name,
-            "metadata": metadata,
-        }
-        if flow_name:
-            kwargs["override_parent_flow_name"] = flow_name
-        try:
-            result = engine.handle_request(node_events.CreateNodeRequest(**kwargs))
-            if hasattr(result, "failed") and result.failed():
-                raise ValueError(getattr(result, "result_details", "") or "group creation failed")
-            actual_name = str(getattr(result, "node_name", None) or group_name)
-        except Exception as exc:
-            notes.append(f"Could not group nodes: {exc}")
-            return ""
-        # Real membership (not just a frame drawn behind the nodes). Members'
-        # positions then have to become group-relative or the editor shifts
-        # them by the frame's canvas position.
-        if self._add_nodes_to_group(engine, node_events, actual_name, member_names, flow_name, notes):
-            origin = (bounds[0] - GROUP_PAD, bounds[1] - GROUP_PAD - GROUP_HEADER)
-            self._shift_members_relative(engine, node_events, member_names, origin, notes)
-        return actual_name
-
-    @staticmethod
-    def _create_with_optional_group(
-        engine: Any,
-        node_events: Any,
-        kwargs: dict[str, Any],
-        parent_group: str | None,
-        ungrouped: list[str] | None,
-        node_name: str,
-    ) -> Any:
-        """CreateNodeRequest with parent_group_name, retrying without it on old
-        engines. Nodes the engine did not parent get recorded in `ungrouped`."""
-        if parent_group:
-            try:
-                result = engine.handle_request(node_events.CreateNodeRequest(**kwargs, parent_group_name=parent_group))
-                grouped = str(getattr(result, "parent_group_name", "") or "") == parent_group
-                if not grouped and ungrouped is not None and not (hasattr(result, "failed") and result.failed()):
-                    ungrouped.append(str(getattr(result, "node_name", None) or node_name))
-                return result
-            except TypeError:
-                pass  # Engine predates parent_group_name; create plainly, group later.
-        result = engine.handle_request(node_events.CreateNodeRequest(**kwargs))
-        if parent_group and ungrouped is not None and not (hasattr(result, "failed") and result.failed()):
-            ungrouped.append(str(getattr(result, "node_name", None) or node_name))
-        return result
-
     def _create_node(
         self,
         engine: Any,
@@ -648,8 +397,6 @@ class DropSAM3DBodyGraphNode(ControlNode):
         node_name: str,
         flow_name: str | None,
         metadata: dict[str, Any] | None = None,
-        parent_group: str | None = None,
-        ungrouped: list[str] | None = None,
     ) -> str:
         kwargs: dict[str, Any] = {
             "node_type": node_type,
@@ -660,7 +407,7 @@ class DropSAM3DBodyGraphNode(ControlNode):
             kwargs["override_parent_flow_name"] = flow_name
         if metadata:
             kwargs["metadata"] = metadata
-        result = self._create_with_optional_group(engine, node_events, kwargs, parent_group, ungrouped, node_name)
+        result = engine.handle_request(node_events.CreateNodeRequest(**kwargs))
         if hasattr(result, "failed") and result.failed():
             details = getattr(result, "result_details", "") or result
             raise ValueError(f"Could not create {node_type}: {details}")
@@ -674,8 +421,6 @@ class DropSAM3DBodyGraphNode(ControlNode):
         node_name: str,
         flow_name: str | None,
         metadata: dict[str, Any] | None = None,
-        parent_group: str | None = None,
-        ungrouped: list[str] | None = None,
     ) -> str:
         for library, node_type in candidates:
             kwargs: dict[str, Any] = {
@@ -688,7 +433,7 @@ class DropSAM3DBodyGraphNode(ControlNode):
             if metadata:
                 kwargs["metadata"] = metadata
             try:
-                result = self._create_with_optional_group(engine, node_events, kwargs, parent_group, ungrouped, node_name)
+                result = engine.handle_request(node_events.CreateNodeRequest(**kwargs))
             except Exception:
                 continue
             if hasattr(result, "failed") and result.failed():
