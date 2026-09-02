@@ -24,6 +24,7 @@ function parseValue(raw) {
   return {
     jointsUrl: String(v.jointsUrl || ""),
     meshUrl: String(v.meshUrl || ""),
+    skeletonUrl: String(v.skeletonUrl || ""),
     fps: Number(v.fps) > 0 ? Number(v.fps) : 24,
     faceCam: !!v.faceCam,
     faceTrack: ft && Array.isArray(ft.headIdx) && ft.headIdx.length && Number(ft.noseIdx) >= 0
@@ -56,7 +57,7 @@ export default function View3DBodyWidget(container, props) {
     '<option value="1.5">1.5x</option><option value="2">2x</option><option value="4">4x</option></select>' +
     '<button class="v3d-face" title="Face mocap camera: follow the head" style="background:#3d3d3d;color:#e0e0e0;border:1px solid #4a4a4a;border-radius:4px;padding:3px 6px;cursor:pointer;white-space:nowrap;">Face</button>' +
     '<button class="v3d-full" title="Fullscreen" style="background:#3d3d3d;color:#e0e0e0;border:1px solid #4a4a4a;border-radius:4px;padding:3px 6px;cursor:pointer;">\u26f6</button>' +
-    '<span class="v3d-ver" style="color:#7a7a7a;white-space:nowrap;">v7</span>' +
+    '<span class="v3d-ver" style="color:#7a7a7a;white-space:nowrap;">v8</span>' +
     '<label style="display:flex;gap:3px;align-items:center;color:#b0b0b0;cursor:pointer;">' +
     '<input class="v3d-mesh" type="checkbox" checked />mesh</label>' +
     '<label class="v3d-body-label" style="display:flex;gap:3px;align-items:center;color:#b0b0b0;cursor:pointer;">' +
@@ -94,9 +95,11 @@ export default function View3DBodyWidget(container, props) {
   var anim = { frame: 0, playing: false, lastTick: 0, nFrames: 0 };
   var jointData = { frames: [] };
   var meshData = null; // {nFrames, nVerts, verts, geometry, mesh}
+  var skelData = null; // {frames, bones, nJoints, lines, dots, group}
   var loadToken = 0;
   var loadedJointsUrl = "";
   var loadedMeshUrl = "";
+  var loadedSkelUrl = "";
   var resizeObserver = null;
   var perf = { t0: 0, count: 0 };
   // Face mocap cam: rigidly attached to the head like a helmet rig. sc/sf/su
@@ -342,6 +345,23 @@ export default function View3DBodyWidget(container, props) {
       for (; s < spheres.length; s++) spheres[s].visible = false;
     }
 
+    if (skelData) {
+      var sf2 = Math.min(idx, skelData.frames.length - 1);
+      var pts = skelData.frames[sf2];
+      var lp = skelData.linePos;
+      for (var b = 0; b < skelData.bones.length; b++) {
+        var a3 = skelData.bones[b][0] * 3;
+        var b3 = skelData.bones[b][1] * 3;
+        lp[b * 6] = pts[a3]; lp[b * 6 + 1] = pts[a3 + 1]; lp[b * 6 + 2] = pts[a3 + 2];
+        lp[b * 6 + 3] = pts[b3]; lp[b * 6 + 4] = pts[b3 + 1]; lp[b * 6 + 5] = pts[b3 + 2];
+      }
+      skelData.lineGeo.attributes.position.needsUpdate = true;
+      for (var d = 0; d < skelData.dots.length; d++) {
+        var d3 = d * 3;
+        skelData.dots[d].position.set(pts[d3], pts[d3 + 1], pts[d3 + 2]);
+      }
+    }
+
     if (face.on) updateFaceCam(idx);
 
     frameSlider.value = String(idx);
@@ -365,7 +385,7 @@ export default function View3DBodyWidget(container, props) {
         if (!perf.t0) perf.t0 = ts;
         perf.count += advance;
         if (ts - perf.t0 >= 1000) {
-          verEl.textContent = "v7 \u00b7 " + (perf.count * 1000 / (ts - perf.t0)).toFixed(1) + "fps";
+          verEl.textContent = "v8 \u00b7 " + (perf.count * 1000 / (ts - perf.t0)).toFixed(1) + "fps";
           perf.t0 = ts;
           perf.count = 0;
         }
@@ -417,6 +437,71 @@ export default function View3DBodyWidget(container, props) {
     face.crownIdx = -1; // new mesh = re-pick the crown anchor
     face.sc = null;
     face.su = null;
+  }
+
+  function clearSkeleton() {
+    if (skelData && ctx) {
+      ctx.scene.remove(skelData.group);
+      if (skelData.lineGeo) skelData.lineGeo.dispose();
+    }
+    skelData = null;
+  }
+
+  function buildSkeleton(data) {
+    var R = window.THREE;
+    clearSkeleton();
+    var frames = data.frames || [];
+    var bones = data.bones || [];
+    var nJoints = Number(data.nJoints) || (frames.length ? Math.floor(frames[0].length / 3) : 0);
+    if (!frames.length || !nJoints) {
+      statusEl.textContent = "empty skeleton";
+      return;
+    }
+    if (Number(data.fps) > 0) state.fps = Number(data.fps);
+
+    var group = new R.Group();
+    // Bones as line segments (2 verts per bone), refreshed every frame.
+    var lineGeo = new R.BufferGeometry();
+    var linePos = new Float32Array(bones.length * 6);
+    lineGeo.setAttribute("position", new R.BufferAttribute(linePos, 3));
+    var lines = new R.LineSegments(lineGeo, new R.LineBasicMaterial({ color: 0x6fd6ff }));
+    lines.frustumCulled = false;
+    group.add(lines);
+    // Joints as small orange spheres.
+    var dotGeo = new R.SphereGeometry(0.014, 8, 8);
+    var dotMat = new R.MeshStandardMaterial({ color: 0xffb04a, roughness: 0.4 });
+    var dots = [];
+    for (var i = 0; i < nJoints; i++) {
+      var dot = new R.Mesh(dotGeo, dotMat);
+      dots.push(dot);
+      group.add(dot);
+    }
+    ctx.scene.add(group);
+    skelData = { frames: frames, bones: bones, nJoints: nJoints, group: group, lineGeo: lineGeo, linePos: linePos, dots: dots };
+
+    // Skeleton-only node: the mesh/body/joints toggles and face cam don't apply.
+    faceBtn.style.display = "none";
+    bodyLabel.style.display = "none";
+    if (meshToggle.parentElement) meshToggle.parentElement.style.display = "none";
+    if (jointsToggle.parentElement) jointsToggle.parentElement.style.display = "none";
+
+    anim.nFrames = Math.max(anim.nFrames, frames.length);
+    frameSlider.max = String(Math.max(0, anim.nFrames - 1));
+
+    // Frame the camera on the first pose.
+    var flat = frames[0];
+    var cx = 0, cy = 0, cz = 0, minY = Infinity, maxY = -Infinity;
+    for (var j = 0; j < flat.length; j += 3) {
+      cx += flat[j]; cy += flat[j + 1]; cz += flat[j + 2];
+      minY = Math.min(minY, flat[j + 1]);
+      maxY = Math.max(maxY, flat[j + 1]);
+    }
+    ctx.orbit.cx = cx / nJoints;
+    ctx.orbit.cy = cy / nJoints;
+    ctx.orbit.cz = cz / nJoints;
+    ctx.orbit.dist = Math.max(1.5, (maxY - minY) * 2.2);
+    ctx.applyCamera();
+    setFrame(Math.min(anim.frame, anim.nFrames - 1));
   }
 
   function buildJoints(data) {
@@ -531,13 +616,33 @@ export default function View3DBodyWidget(container, props) {
     if (!ctx || destroyed) return;
     var token = ++loadToken;
 
-    if (!state.jointsUrl && !state.meshUrl) {
+    if (!state.jointsUrl && !state.meshUrl && !state.skeletonUrl) {
       clearJoints();
       clearMesh();
+      clearSkeleton();
       anim.nFrames = 0;
       frameLabel.textContent = "run node";
       statusEl.textContent = "";
       return;
+    }
+
+    if (state.skeletonUrl && state.skeletonUrl !== loadedSkelUrl) {
+      statusEl.textContent = "skeleton: loading...";
+      fetch(state.skeletonUrl)
+        .then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        })
+        .then(function (data) {
+          if (destroyed || token !== loadToken) return;
+          loadedSkelUrl = state.skeletonUrl;
+          anim.nFrames = 0; // skeleton is the sole data source for this node
+          buildSkeleton(data);
+          statusEl.textContent = "";
+        })
+        .catch(function (err) {
+          if (token === loadToken) statusEl.textContent = "skeleton failed: " + (err && err.message ? err.message : err);
+        });
     }
 
     if (state.jointsUrl && state.jointsUrl !== loadedJointsUrl) {
@@ -572,7 +677,7 @@ export default function View3DBodyWidget(container, props) {
         .catch(function (err) {
           if (token === loadToken) statusEl.textContent = "mesh failed: " + (err && err.message ? err.message : err);
         });
-    } else if (!state.meshUrl && state.jointsUrl) {
+    } else if (!state.meshUrl && !state.skeletonUrl && state.jointsUrl) {
       statusEl.textContent = "no mesh in state - re-run node";
     }
   }
@@ -665,7 +770,10 @@ export default function View3DBodyWidget(container, props) {
   function externalUpdate(newProps) {
     if (destroyed) return;
     var next = parseValue(newProps && newProps.value);
-    var changed = next.jointsUrl !== state.jointsUrl || next.meshUrl !== state.meshUrl;
+    var changed =
+      next.jointsUrl !== state.jointsUrl ||
+      next.meshUrl !== state.meshUrl ||
+      next.skeletonUrl !== state.skeletonUrl;
     state = next;
     if (changed) loadData();
   }

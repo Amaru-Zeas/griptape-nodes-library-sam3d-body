@@ -52,7 +52,7 @@
     "widgets": [
         {
             "name": "View3DBodyWidget",
-            "path": "View3DBodyWidget.v7.js",
+            "path": "View3DBodyWidget.v8.js",
             "description": "three.js viewer: orbit/pan/zoom the recovered body and play or scrub the animation."
         }
     ],
@@ -109,6 +109,15 @@
                 "category": "SAM3DBody",
                 "description": "Face mocap close-up: a virtual camera rigged to the head follows the face every frame, like a VFX head-mounted cam.",
                 "display_name": "3D Face Close-Up Viewer"
+            }
+        },
+        {
+            "class_name": "ViewBVHSkeletonNode",
+            "file_path": "bvh_view_node.py",
+            "metadata": {
+                "category": "SAM3DBody",
+                "description": "Play a .bvh mocap file as an animated bone skeleton: wire bvh_path from One-Click, or view any external BVH (Mixamo, Rokoko...).",
+                "display_name": "BVH Skeleton Viewer"
             }
         },
         {

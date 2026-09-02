@@ -64,6 +64,8 @@ COMPACT_LAYOUT = {
     "view3d": (1460, 660, 980, 880),
     # Face mocap close-up viewer, below the body viewer.
     "viewface": (1460, 1600, 700, 660),
+    # BVH skeleton viewer, below the face close-up.
+    "viewbvh": (1460, 2320, 700, 620),
 }
 class DropSAM3DBodyGraphNode(ControlNode):
     """Drop this node, then click the button (or run it) to spawn the full wired pipeline."""
@@ -313,6 +315,7 @@ class DropSAM3DBodyGraphNode(ControlNode):
         spawn("oneclick", "SAM3DBodyOneClickNode")
         spawn("view3d", "ViewSAM3DBodyNode")
         spawn("viewface", "ViewSAM3DFaceNode")
+        spawn("viewbvh", "ViewBVHSkeletonNode")
 
         if bool(self.get_parameter_value("include_load_video")):
             video_name = self._create_candidate_node(
@@ -350,6 +353,7 @@ class DropSAM3DBodyGraphNode(ControlNode):
         self._connect(engine, connection_cls, created["oneclick"], "pose_path", created["view3d"], "pose_path", notes)
         self._connect(engine, connection_cls, created["oneclick"], "glb_path", created["view3d"], "glb_path", notes)
         self._connect(engine, connection_cls, created["oneclick"], "pose_path", created["viewface"], "pose_path", notes)
+        self._connect(engine, connection_cls, created["oneclick"], "bvh_path", created["viewbvh"], "bvh_path", notes)
 
         # LAST step before handing the canvas back: re-assert every node's
         # planned position. Wiring connections (value pushes into display

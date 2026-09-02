@@ -23,15 +23,15 @@ Takes 10-20 minutes and needs an NVIDIA GPU. Watch the logs on the node.
 
 **3. Drop "Build SAM 3D Body Graph" and click the button**
 It spawns a ready-wired graph (video in -> overlay video + 3D body viewer +
-3D face close-up viewer) and removes itself.
+3D face close-up viewer + BVH skeleton viewer) and removes itself.
 
 **4. Load a video and run**
 Pick a clip with one clearly visible person, then run the One-Click node.
 
 **You get:** a mesh-overlay video, an interactive 3D viewer (orbit / pan / zoom,
 fullscreen, rainbow body colors + face expressions), a face mocap close-up viewer
-(camera locked to the head, like a VFX head-cam), and GLB / BVH files for Blender
-or Unreal.
+(camera locked to the head, like a VFX head-cam), an animated bone-skeleton
+viewer, and GLB / BVH files for Blender or Unreal.
 
 **Speed**
 - The first run loads the model (~20 s extra); after that a warm worker keeps it
@@ -46,6 +46,8 @@ or Unreal.
   head-locked mocap cam (camera follows the head, mouse control disabled);
   the "body" checkbox hides everything below the neck.
 - Normal mode: drag = orbit, middle-mouse or Shift+drag = pan, wheel = zoom.
+- "BVH Skeleton Viewer" plays the exported .bvh as animated bones - and it
+  opens any external BVH too (Mixamo, Rokoko, ...): just set its `bvh_path`.
 
 **Tips**
 - Jittery result? Raise `smooth_strength` to 2-3 and `smooth_window` to 9-13.
@@ -62,7 +64,7 @@ class SAM3DBodyInstructionsNode(BaseNode):
         super().__init__(name, metadata)
         # Default to a size that shows the whole guide without scrolling.
         if "size" not in self.metadata:
-            self.metadata["size"] = {"width": 680, "height": 1230}
+            self.metadata["size"] = {"width": 680, "height": 1300}
         self.add_parameter(
             ParameterString(
                 name="note",
