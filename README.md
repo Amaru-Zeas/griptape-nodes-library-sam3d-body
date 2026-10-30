@@ -1,5 +1,7 @@
 # GTN SAM 3D Body
 
+![SAM 3D Body karate example in Griptape Nodes: source video, mesh overlay, and the interactive 3D viewer](docs/karate-example.png)
+
 Turn a video of a person into a **3D body animation** inside [Griptape Nodes](https://www.griptapenodes.com/) — powered by Meta's [SAM 3D Body](https://github.com/facebookresearch/sam-3d-body) (the same model behind the ComfyUI SAM 3D Body graph, Kijai / Comfy-Org).
 
 You get:
